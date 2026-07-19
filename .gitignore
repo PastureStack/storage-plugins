@@ -1,6 +1,5 @@
-/.dapper
-/bin
-/dist
-*.swp
-/.trash-cache
-/package/storage
+/bin/
+/coverage/
+/dist/
+*.out
+*.test
