@@ -1,28 +1,135 @@
-Rancher Storage
-==============
+PastureStack is an independent community effort to preserve, audit, and modernize the Rancher 1.6 ecosystem. It is not affiliated with or endorsed by Rancher Labs or SUSE.
 
-This repo contains Rancher specific storage plugins
+**Upstream:** [`rancher/storage`](https://github.com/rancher/storage). This GitHub fork retains the upstream Git history, authorship, dates, and license notices unchanged; PastureStack maintenance is consolidated into one commit after the preserved upstream boundary.
 
-## Building
+# storage-plugins
 
-`make`
+`storage-plugins` contains two deliberately separated deliverables:
 
+- an alpha, offline contract validator and deterministic lifecycle planner; and
+- the reviewed storage compatibility runtime published as semantic-versioned
+  NFS, Amazon EBS, and Amazon EFS images in GitHub Container Registry.
 
-## Running
+The planner preserves capability and state-transition intent without connecting
+to storage systems or changing host or cloud state. The storage runtime is isolated
+under [`runtime/nfs`](runtime/nfs/README.md), has a separate build boundary, and
+is the only privileged runtime delivered by this repository.
 
-Add this repo as a catalog in Rancher to run the local builds
+## Driver contracts
 
-## License
-Copyright (c) 2014-2016 [Rancher Labs, Inc.](http://rancher.com)
+The current contract surface contains exactly seven driver identifiers:
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+- `aliyun-block`
+- `aws-ebs`
+- `aws-efs`
+- `ceph-rbd`
+- `longhorn`
+- `loop` (`developmentOnly: true`)
+- `nfs`
 
-[http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0)
+The identifiers are new contracts, not compatibility aliases. Driver-specific fields, operation support, and delegated components are documented in [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+## Planner safety boundary
+
+The planner never executes a lifecycle action. Every generated step has `status: "blocked"`, every plan has `executable: false` and `effect: "none"`, and every runtime control is reported as `false`:
+
+- network and cloud APIs
+- Docker and host sockets
+- host paths and privileged access
+- mount, unmount, format, and delete
+- credential and secret reads
+- state writes and execution
+
+An irreversible-action acknowledgement changes diagnostic context only; it never enables execution. See [SECURITY.md](SECURITY.md) for the threat model and reporting guidance.
+
+An AST gate recursively checks every planner production Go file, including
+files added under new planner package directories. The separately versioned
+`runtime/nfs` module has its own container-build and script gates. Planner
+imports are restricted to the reviewed standard-library set and module-local
+packages. The CLI entry point is the only planner file allowed to import `os`,
+and only `Args`, `Stdin`, `Stdout`, `Stderr`, and `Exit` selectors are
+permitted.
+
+## CLI
+
+The binary exposes exactly three subcommands:
+
+```text
+storage-plugins capabilities --locale en-US
+storage-plugins validate --locale en-US
+storage-plugins plan --locale zh-TW
+```
+
+`capabilities` does not read standard input. `validate` and `plan` read exactly one JSON document from standard input, with a maximum size of 2 MiB. Supported locales are exactly `en-US` and `zh-TW`; the explicit message catalogs are in [`locales/`](locales/).
+
+The decoder rejects duplicate, missing, unknown, or case-variant keys; multiple JSON documents; nesting deeper than 16 levels; invalid UTF-8; control characters; unsafe identifiers; raw paths or URLs; arbitrary mount-option strings; and secret or credential material. JSON `null` is rejected at every depth and for every field type; optional fields must be omitted instead.
+
+## Request contract
+
+Requests use `storage-plugins.pasturestack.io/v1alpha1` and `LifecyclePlanRequest`. The lifecycle is:
+
+```text
+absent -> available -> attached -> mounted
+absent <- available <- attached <- mounted
+```
+
+The operation selects one transition: `create`, `attach`, `mount`, `unmount`, `detach`, or `remove`. Ownership, observed generation, expected generation, and an idempotency key are required. External systems are represented only by safe opaque `ref:` or `sha256:` references.
+
+Ready-to-run NFS and block-storage requests, plus commands for all three subcommands, are in [`examples/`](examples/).
+
+Plans have a deterministic `sha256:` identifier derived from normalized semantic input. They contain sorted gates, blocked steps, diagnostics, and the complete disabled-control object. They contain no clock, random, credential, or secret data.
+
+## Build and test
+
+The core uses Go 1.26 and only the standard library:
+
+```sh
+go test ./...
+go vet ./...
+go mod verify
+go build -trimpath -buildvcs=false ./cmd/storage-plugins
+```
+
+The repository validation scripts add public-tree, legal-file, reproducibility, binary-content, and example smoke gates:
+
+```text
+pwsh -File scripts/validate.ps1
+sh scripts/validate.sh
+```
+
+The test suite covers all seven driver contracts, strict JSON behavior, the lifecycle table, ownership and generation gates, deterministic idempotency, irreversible-action blocking, locale parity, and forbidden dangerous imports or calls.
+
+## Storage runtime
+
+The maintained images and driver identifiers are:
+
+```text
+ghcr.io/pasturestack/nfs-storage-driver:<semantic-version>  pasturestack-nfs
+ghcr.io/pasturestack/ebs-storage-driver:<semantic-version>  pasturestack-ebs
+ghcr.io/pasturestack/efs-storage-driver:<semantic-version>  pasturestack-efs
+```
+
+Build an exact NFS release candidate from the repository root:
+
+```sh
+docker build \
+  --build-arg IMAGE_VERSION=v0.9.13 \
+  --file runtime/nfs/image/nfs/Dockerfile \
+  --tag nfs-storage-driver:v0.9.13 \
+  .
+```
+
+Operational templates always reference a semantic version tag. Release
+verification records may retain the resolved digest, but digest-qualified image
+references are intentionally excluded from Catalog, Compose, API, and UI data.
+
+The runtime defaults to retaining data. `purge` removes only a validated
+driver-owned subdirectory; a directly supplied NFS export is always treated as
+externally managed and is never recursively purged.
+
+## License and provenance
+
+The inherited root [`LICENSE`](LICENSE) remains unchanged. Go toolchain notices
+are kept separately in [`LICENSES/`](LICENSES/), and vendored runtime license
+files remain beside their corresponding dependencies. See
+[ORIGIN.md](ORIGIN.md) for the source and distribution boundaries.

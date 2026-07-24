@@ -1,0 +1,272 @@
+#!/bin/bash
+
+set -o pipefail
+
+if [ -e "$(dirname "$0")/common.sh" ]; then
+    source "$(dirname "$0")/common.sh"
+elif [ -e "$(dirname "$0")/../common/common.sh" ]; then
+    source "$(dirname "$0")/../common/common.sh"
+fi
+
+metadata_value() {
+    local path="$1"
+    local endpoint="${AWS_EC2_METADATA_SERVICE_ENDPOINT:-http://169.254.169.254}"
+    local token
+
+    if [[ ! "$endpoint" =~ ^https?://[A-Za-z0-9.\[\]:_-]+$ ]]; then
+        print_error "EC2 metadata endpoint is invalid"
+    fi
+
+    token="$(curl -fsS \
+        --connect-timeout 1 \
+        --max-time 3 \
+        --request PUT \
+        --header "X-aws-ec2-metadata-token-ttl-seconds: 300" \
+        "$endpoint/latest/api/token")" ||
+        print_error "EC2 IMDSv2 token request failed"
+
+    curl -fsS \
+        --connect-timeout 1 \
+        --max-time 3 \
+        --header "X-aws-ec2-metadata-token: $token" \
+        "$endpoint/latest/meta-data/$path" ||
+        print_error "EC2 metadata request failed for $path"
+}
+
+resolve_region() {
+    AWS_REGION_RESOLVED="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+    if [ -z "$AWS_REGION_RESOLVED" ]; then
+        local zone
+        zone="${EC2_AVAILABILITY_ZONE:-}"
+        if [ -z "$zone" ]; then
+            zone="$(metadata_value placement/availability-zone)"
+        fi
+        AWS_REGION_RESOLVED="${zone%[a-z]}"
+    fi
+
+    [[ "$AWS_REGION_RESOLVED" =~ ^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$ ]] ||
+        print_error "AWS region is invalid"
+}
+
+aws_efs() {
+    aws --no-cli-pager --region "$AWS_REGION_RESOLVED" efs "$@"
+}
+
+validate_filesystem_id() {
+    [[ "${1:-}" =~ ^fs-[0-9a-f]{8,32}$ ]] ||
+        print_error "EFS filesystem ID is invalid"
+}
+
+validate_name() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] ||
+        print_error "volume name contains unsupported characters"
+}
+
+validate_mount_destination() {
+    local destination="$1"
+    case "$destination" in
+        /var/lib/pasturestack/volumes/pasturestack-efs/*)
+            ;;
+        *)
+            print_error "mount destination is outside the driver-owned directory"
+            ;;
+    esac
+}
+
+validate_export() {
+    local export_path="$1"
+    if [[ "$export_path" != /* ]] ||
+       [[ "$export_path" =~ (^|/)\.\.(/|$) ]] ||
+       [[ "$export_path" =~ [[:cntrl:]] ]]; then
+        print_error "EFS export must be an absolute path without parent traversal"
+    fi
+}
+
+validate_mount_options() {
+    local options="$1"
+    if [ -n "$options" ] &&
+       [[ ! "$options" =~ ^[A-Za-z0-9_.=,:+-]+$ ]]; then
+        print_error "mount options contain unsupported characters"
+    fi
+}
+
+init() {
+    local tool
+    for tool in aws curl jq mount mountpoint umount; do
+        command -v "$tool" >/dev/null 2>&1 ||
+            print_error "required tool is missing: $tool"
+    done
+    # Cloud metadata is intentionally not contacted during initialization.
+    # This keeps the global driver healthy on non-AWS hosts until it is used.
+    print_success
+}
+
+create() {
+    local name="${OPTS[name]:-}"
+    local filesystem_id="${OPTS[fsid]:-}"
+    local performance_mode="${OPTS[performanceMode]:-generalPurpose}"
+    local throughput_mode="${OPTS[throughputMode]:-bursting}"
+    local subnet_id="${EFS_SUBNET_ID:-}"
+    local security_group_id="${EFS_SECURITY_GROUP_ID:-}"
+    local mount_target_id
+
+    validate_name "$name"
+    if [ -n "$filesystem_id" ]; then
+        validate_filesystem_id "$filesystem_id"
+        print_success
+        return
+    fi
+
+    [ "${ALLOW_CLOUD_PROVISIONING:-false}" = "true" ] ||
+        print_error "cloud provisioning is disabled; supply an existing fsid"
+    case "$performance_mode" in
+        generalPurpose|maxIO)
+            ;;
+        *)
+            print_error "EFS performance mode is unsupported"
+            ;;
+    esac
+    case "$throughput_mode" in
+        bursting|elastic)
+            ;;
+        *)
+            print_error "EFS throughput mode is unsupported"
+            ;;
+    esac
+    [[ "$subnet_id" =~ ^subnet-[0-9a-f]{8,32}$ ]] ||
+        print_error "EFS_SUBNET_ID is required for cloud provisioning"
+    [[ "$security_group_id" =~ ^sg-[0-9a-f]{8,32}$ ]] ||
+        print_error "EFS_SECURITY_GROUP_ID is required for cloud provisioning"
+
+    resolve_region
+    filesystem_id="$(
+        aws_efs create-file-system \
+            --creation-token "$name" \
+            --performance-mode "$performance_mode" \
+            --throughput-mode "$throughput_mode" \
+            --encrypted \
+            --tags "Key=Name,Value=$name" \
+            --query FileSystemId \
+            --output text
+    )" || print_error "failed to create EFS filesystem"
+    validate_filesystem_id "$filesystem_id"
+    aws_efs wait file-system-available --file-system-id "$filesystem_id" ||
+        print_error "new EFS filesystem did not become available"
+
+    mount_target_id="$(
+        aws_efs create-mount-target \
+            --file-system-id "$filesystem_id" \
+            --subnet-id "$subnet_id" \
+            --security-groups "$security_group_id" \
+            --query MountTargetId \
+            --output text
+    )" || print_error "failed to create EFS mount target"
+    [[ "$mount_target_id" =~ ^fsmt-[0-9a-f]{8,32}$ ]] ||
+        print_error "EFS mount target ID is invalid"
+    aws_efs wait mount-target-available --mount-target-id "$mount_target_id" ||
+        print_error "new EFS mount target did not become available"
+
+    print_options \
+        created true \
+        fsid "$filesystem_id" \
+        mountTargetId "$mount_target_id" \
+        ec2_region "$AWS_REGION_RESOLVED"
+}
+
+attach() {
+    print_not_supported
+}
+
+detach() {
+    print_not_supported
+}
+
+mountdest() {
+    local filesystem_id="${OPTS[fsid]:-}"
+    local export_path="${OPTS[export]:-/}"
+    local options="${OPTS[mntOptions]:-vers=4.1}"
+    local mount_dns="${EFS_MOUNT_DNS:-}"
+
+    validate_filesystem_id "$filesystem_id"
+    validate_mount_destination "$MNT_DEST"
+    validate_export "$export_path"
+    validate_mount_options "$options"
+    resolve_region
+
+    if [ -z "$mount_dns" ]; then
+        mount_dns="${filesystem_id}.efs.${AWS_REGION_RESOLVED}.amazonaws.com"
+    fi
+    if [[ ! "$mount_dns" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]]; then
+        print_error "EFS mount DNS name is invalid"
+    fi
+
+    mkdir -p -- "$MNT_DEST"
+    if [ "$(ismounted "$MNT_DEST")" = "0" ]; then
+        mount \
+            -t nfs4 \
+            -o "$options" \
+            "${mount_dns}:${export_path}" \
+            "$MNT_DEST" ||
+            print_error "failed to mount EFS filesystem"
+    fi
+    print_success
+}
+
+unmount() {
+    validate_mount_destination "$MNT_DEST"
+    if [ "$(ismounted "$MNT_DEST")" = "1" ]; then
+        umount -- "$MNT_DEST" || print_error "failed to unmount EFS filesystem"
+    fi
+    print_success
+}
+
+delete() {
+    local filesystem_id="${OPTS[fsid]:-}"
+    local mount_target_id="${OPTS[mountTargetId]:-}"
+    local attempt
+    local remaining
+    local result
+
+    if [ "${OPTS[created]:-false}" != "true" ]; then
+        print_success
+        return
+    fi
+    [ "${ALLOW_CLOUD_PROVISIONING:-false}" = "true" ] ||
+        print_error "cloud deletion is disabled"
+    validate_filesystem_id "$filesystem_id"
+    [[ "$mount_target_id" =~ ^fsmt-[0-9a-f]{8,32}$ ]] ||
+        print_error "EFS mount target ID is invalid"
+    resolve_region
+
+    if ! result="$(aws_efs describe-file-systems \
+        --file-system-id "$filesystem_id" \
+        --query 'FileSystems[0].FileSystemId' \
+        --output text 2>&1)"; then
+        if [[ "$result" == *"FileSystemNotFound"* ]]; then
+            print_success
+            return
+        fi
+        print_error "failed to inspect EFS filesystem before deletion"
+    fi
+
+    aws_efs delete-mount-target --mount-target-id "$mount_target_id" ||
+        print_error "failed to delete EFS mount target"
+    for attempt in $(seq 1 60); do
+        remaining="$(
+            aws_efs describe-mount-targets \
+                --file-system-id "$filesystem_id" \
+                --query 'length(MountTargets)' \
+                --output text
+        )" || print_error "failed to inspect EFS mount targets"
+        [ "$remaining" = "0" ] && break
+        sleep 2
+    done
+    [ "$remaining" = "0" ] ||
+        print_error "EFS mount target did not finish deleting"
+
+    aws_efs delete-file-system --file-system-id "$filesystem_id" ||
+        print_error "failed to delete EFS filesystem"
+    print_success
+}
+
+main "$@"

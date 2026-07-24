@@ -1,0 +1,149 @@
+name: Publish AWS storage drivers
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        driver:
+          - ebs
+          - efs
+    steps:
+      - name: Validate release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" != "push" ]]; then
+            echo "Publish only by pushing an immutable semantic-version tag." >&2
+            exit 1
+          fi
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - name: Check out exact public tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git clone \
+            --branch "$RELEASE_TAG" \
+            --depth 1 \
+            "https://github.com/${SOURCE_REPOSITORY}.git" \
+            .
+
+      - name: Validate source and driver script
+        shell: bash
+        env:
+          DRIVER: ${{ matrix.driver }}
+        run: |
+          set -euo pipefail
+          sh scripts/validate.sh
+          bash -n "runtime/nfs/image/${DRIVER}/pasturestack-${DRIVER}"
+          bash -n runtime/nfs/image/common/common.sh
+          bash -n runtime/nfs/image/common/start.sh
+          bash -n runtime/nfs/image/common/update-control-plane-ca
+
+      - name: Build exact semantic-version image
+        shell: bash
+        env:
+          DRIVER: ${{ matrix.driver }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg "IMAGE_VERSION=${RELEASE_TAG}" \
+            --file "runtime/nfs/image/${DRIVER}/Dockerfile" \
+            --tag "ghcr.io/pasturestack/${DRIVER}-storage-driver:${RELEASE_TAG}" \
+            .
+
+      - name: Smoke-test safe default contract
+        shell: bash
+        env:
+          DRIVER: ${{ matrix.driver }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/pasturestack/${DRIVER}-storage-driver:${RELEASE_TAG}"
+          docker run --rm \
+            --entrypoint /usr/bin/pasturestack-storage-runtime \
+            "$image" \
+            --version |
+            grep -F "$RELEASE_TAG"
+          docker run --rm \
+            --entrypoint "/usr/bin/pasturestack-${DRIVER}" \
+            "$image" \
+            init |
+            grep -F '"status":"Success"'
+          if [[ "$DRIVER" == "ebs" ]]; then
+            existing='{"name":"existing-probe","volumeID":"vol-0123456789abcdef0"}'
+            blocked='{"name":"blocked-probe","size":"10"}'
+          else
+            existing='{"name":"existing-probe","fsid":"fs-0123456789abcdef0"}'
+            blocked='{"name":"blocked-probe"}'
+          fi
+          docker run --rm \
+            --entrypoint "/usr/bin/pasturestack-${DRIVER}" \
+            "$image" \
+            create "$existing" |
+            grep -F '"status":"Success"'
+          if docker run --rm \
+            --entrypoint "/usr/bin/pasturestack-${DRIVER}" \
+            "$image" \
+            create "$blocked"; then
+            echo 'cloud provisioning was not blocked by default' >&2
+            exit 1
+          fi
+
+      - name: Scan image
+        shell: bash
+        env:
+          DRIVER: ${{ matrix.driver }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/pasturestack/${DRIVER}-storage-driver:${RELEASE_TAG}"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            "aquasec/trivy@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e" \
+            image \
+            --scanners vuln,secret \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --no-progress \
+            "$image"
+
+      - name: Authenticate to GitHub Container Registry
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            docker login ghcr.io --username "$GHCR_USER" --password-stdin
+
+      - name: Publish exact semantic-version image
+        shell: bash
+        env:
+          DRIVER: ${{ matrix.driver }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          docker push \
+            "ghcr.io/pasturestack/${DRIVER}-storage-driver:${RELEASE_TAG}"

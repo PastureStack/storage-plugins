@@ -1,0 +1,25 @@
+{
+  "apiVersion": "storage-plugins.pasturestack.io/v1alpha1",
+  "kind": "LifecyclePlanRequest",
+  "driver": "aws-ebs",
+  "operation": "create",
+  "idempotencyKey": "example-ebs-create",
+  "ownerId": "team-a",
+  "expectedGeneration": 0,
+  "observedState": {
+    "phase": "absent",
+    "generation": 0,
+    "ownerId": ""
+  },
+  "desired": {
+    "phase": "available",
+    "allowIrreversible": true,
+    "config": {
+      "volumeType": "gp3",
+      "sizeGiB": 100,
+      "iops": 3000,
+      "encrypted": true,
+      "kmsRef": "ref:kms-policy-a"
+    }
+  }
+}

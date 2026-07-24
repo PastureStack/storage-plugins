@@ -1,0 +1,275 @@
+#!/bin/bash
+
+if [ -e "$(dirname $0)/common.sh" ]; then
+    source $(dirname $0)/common.sh
+elif [ -e "$(dirname $0)/../common/common.sh" ]; then
+    source $(dirname $0)/../common/common.sh
+fi
+
+mount_nfs() {
+    local host="$1"
+    local exportDir="$2"
+    local mountDir="$3"
+    local opts="$4"
+    local error
+
+    validate_host "$host"
+    validate_export "$exportDir"
+    validate_mount_options "$opts"
+
+    if [ "$(ismounted "$mountDir")" = 0 ]; then
+        mkdir -p "$mountDir"
+
+        local cmd=(mount)
+        if [ -n "$opts" ]; then
+            cmd+=(-o "$opts")
+        fi
+        cmd+=("${host}:${exportDir}" "$mountDir")
+
+        if ! error=$("${cmd[@]}" 2>&1); then
+            print_error "Failed ${cmd[*]}: $error"
+        fi
+    fi
+}
+
+unmount_nfs() {
+    local mountDir="$1"
+
+    local error
+    if [ "$(ismounted "$mountDir")" = 1 ] ; then
+        if ! error=$(umount "$mountDir" 2>&1); then
+            print_error "Failed umount $mountDir: $error"
+        fi
+    fi
+
+    if [ -d "$mountDir" ] && [ -z "$(ls -A "$mountDir")" ]; then
+        rmdir -- "$mountDir"
+    fi
+}
+
+validate_name() {
+    local name="$1"
+    if [ -z "$name" ] || \
+       [ "$name" = "." ] || \
+       [ "$name" = ".." ] || \
+       [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        print_error "volume name contains unsupported characters"
+    fi
+}
+
+validate_host() {
+    local host="$1"
+    if [ -z "$host" ] || \
+       [[ "$host" = -* ]] || \
+       [[ "$host" =~ [[:space:]/] ]]; then
+        print_error "NFS server is invalid"
+    fi
+}
+
+validate_export() {
+    local exportDir="$1"
+    if [[ "$exportDir" != /* ]] || \
+       [[ "$exportDir" =~ (^|/)\.\.(/|$) ]] || \
+       [[ "$exportDir" =~ [[:cntrl:]] ]]; then
+        print_error "NFS export must be an absolute path without parent traversal"
+    fi
+}
+
+validate_mount_options() {
+    local opts="$1"
+    if [ -n "$opts" ] && [[ ! "$opts" =~ ^[A-Za-z0-9_.=,:+-]+$ ]]; then
+        print_error "mount options contain unsupported characters"
+    fi
+}
+
+validate_removal_policy() {
+    case "$1" in
+        retain|purge)
+            ;;
+        *)
+            print_error "removal policy must be retain or purge"
+            ;;
+    esac
+}
+
+join_export_path() {
+    local base="$1"
+    local name="$2"
+    base="${base%/}"
+    if [ -z "$base" ]; then
+        base="/"
+    fi
+    if [ "$base" = "/" ]; then
+        printf '/%s\n' "$name"
+    else
+        printf '%s/%s\n' "$base" "$name"
+    fi
+}
+
+init() {
+    rpcbind -f &>/dev/null &
+    validate
+    print_success
+}
+
+tmp_dir() {
+    mktemp -d /tmp/pasturestack-nfs.XXXXXX
+}
+
+################################################################################
+# These functions are called by the volume plugin framework.
+################################################################################
+
+create() {
+    validate_name "${OPTS[name]:-}"
+
+    # default configuration
+    local host="${NFS_SERVER:-}"
+    local exportDir="${MOUNT_DIR:-}"
+    local opts="${MOUNT_OPTS:-}"
+    local name="${OPTS[name]}"
+    local mountDir
+    mountDir="$(tmp_dir)"
+    local onRemove="${ON_REMOVE:-retain}"
+
+    # A direct export is externally managed; validate it but never create or purge it.
+    if [ -n "${OPTS[host]:-}" ] && [ -n "${OPTS[export]:-}" ]; then
+        validate_host "${OPTS[host]}"
+        validate_export "${OPTS[export]}"
+        validate_mount_options "${OPTS[mntOptions]:-}"
+        rmdir -- "$mountDir"
+        print_success
+        exit 0
+    elif [ -n "${OPTS[host]:-}" ] && [ -n "${OPTS[exportBase]:-}" ]; then
+        host="${OPTS[host]}"
+        exportDir="${OPTS[exportBase]}"
+        opts="${OPTS[mntOptions]:-}"
+    fi
+
+    if [ -n "${OPTS[onRemove]:-}" ]; then
+        onRemove="${OPTS[onRemove]}"
+    fi
+    validate_removal_policy "$onRemove"
+
+    # create sub-directory using name parameter to represent volume
+    mount_nfs "$host" "$exportDir" "$mountDir" "$opts"
+    local subDir="$mountDir/$name"
+    local created=0
+    if [ ! -d "${subDir}" ]; then
+        mkdir -p "${subDir}"
+        created=1
+    fi
+    unmount_nfs "${mountDir}"
+
+    if [ "${created}" = 1 ]; then
+        print_options created true name "${OPTS[name]}" onRemove "$onRemove"
+    else
+        print_success
+    fi
+}
+
+attach() {
+    print_not_supported
+}
+
+mountdest() {
+    validate_name "${OPTS[name]:-}"
+
+    # default configuration
+    local host="${NFS_SERVER:-}"
+    local exportDir
+    exportDir="$(join_export_path "${MOUNT_DIR:-}" "${OPTS[name]}")"
+    local opts="${MOUNT_OPTS:-}"
+    local name="${OPTS[name]}"
+    local mountDir="$MNT_DEST"
+
+    # if host/export are set, mount root export
+    if [ -n "${OPTS[host]:-}" ] && [ -n "${OPTS[export]:-}" ]; then
+        host="${OPTS[host]}"
+        exportDir="${OPTS[export]}"
+        opts="${OPTS[mntOptions]:-}"
+    # if host/exportBase are set, mount subfolder
+    elif [ -n "${OPTS[host]:-}" ] && [ -n "${OPTS[exportBase]:-}" ]; then
+        host="${OPTS[host]}"
+        exportDir="$(join_export_path "${OPTS[exportBase]}" "$name")"
+        opts="${OPTS[mntOptions]:-}"
+    fi
+
+    mount_nfs "$host" "$exportDir" "$mountDir" "$opts"
+    print_success
+}
+
+detach() {
+    print_not_supported
+}
+
+unmount() {
+    unmount_nfs "$MNT_DEST"
+    print_success
+}
+
+delete() {
+    validate_name "${OPTS[name]:-}"
+
+    # default configuration
+    local host="${NFS_SERVER:-}"
+    local exportDir="${MOUNT_DIR:-}"
+    local opts="${MOUNT_OPTS:-}"
+    local name="${OPTS[name]}"
+    local mountDir
+    mountDir="$(tmp_dir)"
+    local onRemove="${ON_REMOVE:-retain}"
+
+    if [ -n "${OPTS[onRemove]:-}" ]; then
+        onRemove="${OPTS[onRemove]}"
+    fi
+    validate_removal_policy "$onRemove"
+
+    if [ "$onRemove" = "retain" ]; then
+        log_info "$name" "Retaining volume"
+        rmdir -- "$mountDir"
+        print_success retained
+        exit 0
+    fi
+
+    # Direct exports are not owned by this driver and are never recursively purged.
+    if [ -n "${OPTS[host]:-}" ] && [ -n "${OPTS[export]:-}" ]; then
+        log_warn "$name" "Direct NFS export is externally managed; retaining data"
+        rmdir -- "$mountDir"
+        print_success retained
+        exit 0
+    elif [ -n "${OPTS[host]:-}" ] && [ -n "${OPTS[exportBase]:-}" ]; then
+        host="${OPTS[host]}"
+        exportDir="${OPTS[exportBase]}"
+        opts="${OPTS[mntOptions]:-}"
+    fi
+
+    mount_nfs "$host" "$exportDir" "$mountDir" "$opts"
+    log_info "$name" "Purging owned volume subdirectory"
+    rm -rf -- "$mountDir/$name"
+    unmount_nfs "${mountDir}"
+
+    print_success purged
+}
+
+validate() {
+    # default configuration
+    local host="${NFS_SERVER:-}"
+    local exportDir="${MOUNT_DIR:-}"
+    local opts="${MOUNT_OPTS:-}"
+    local mountDir
+    mountDir="$(tmp_dir)"
+
+    log_info "validation" "Validating NFS by Mounting $mountDir."
+
+    mount_nfs "$host" "$exportDir" "$mountDir" "$opts"
+
+    log_info "validation" "Validation success."
+
+    unmount_nfs "$mountDir"
+
+    log_info "validation" "Clean up success."
+}
+
+# Every script must call main as such
+main "$@"

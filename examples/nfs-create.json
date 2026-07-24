@@ -1,0 +1,27 @@
+{
+  "apiVersion": "storage-plugins.pasturestack.io/v1alpha1",
+  "kind": "LifecyclePlanRequest",
+  "driver": "nfs",
+  "operation": "create",
+  "idempotencyKey": "example-nfs-create",
+  "ownerId": "team-a",
+  "expectedGeneration": 0,
+  "observedState": {
+    "phase": "absent",
+    "generation": 0,
+    "ownerId": ""
+  },
+  "desired": {
+    "phase": "available",
+    "allowIrreversible": false,
+    "config": {
+      "serverRef": "ref:server-a",
+      "exportRef": "ref:export-a",
+      "mountOptions": [
+        "hard",
+        "nfs-v4.1"
+      ],
+      "purgePolicy": "retain"
+    }
+  }
+}

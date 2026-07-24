@@ -1,0 +1,396 @@
+#!/bin/bash
+
+set -o pipefail
+
+if [ -e "$(dirname "$0")/common.sh" ]; then
+    source "$(dirname "$0")/common.sh"
+elif [ -e "$(dirname "$0")/../common/common.sh" ]; then
+    source "$(dirname "$0")/../common/common.sh"
+fi
+
+metadata_value() {
+    local path="$1"
+    local endpoint="${AWS_EC2_METADATA_SERVICE_ENDPOINT:-http://169.254.169.254}"
+    local token
+
+    if [[ ! "$endpoint" =~ ^https?://[A-Za-z0-9.\[\]:_-]+$ ]]; then
+        print_error "EC2 metadata endpoint is invalid"
+    fi
+
+    token="$(curl -fsS \
+        --connect-timeout 1 \
+        --max-time 3 \
+        --request PUT \
+        --header "X-aws-ec2-metadata-token-ttl-seconds: 300" \
+        "$endpoint/latest/api/token")" ||
+        print_error "EC2 IMDSv2 token request failed"
+
+    curl -fsS \
+        --connect-timeout 1 \
+        --max-time 3 \
+        --header "X-aws-ec2-metadata-token: $token" \
+        "$endpoint/latest/meta-data/$path" ||
+        print_error "EC2 metadata request failed for $path"
+}
+
+resolve_cloud_context() {
+    AWS_REGION_RESOLVED="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+    AWS_ZONE_RESOLVED="${EC2_AVAILABILITY_ZONE:-}"
+    INSTANCE_ID_RESOLVED="${EC2_INSTANCE_ID:-}"
+
+    if [ -z "$AWS_ZONE_RESOLVED" ]; then
+        AWS_ZONE_RESOLVED="$(metadata_value placement/availability-zone)"
+    fi
+    if [ -z "$AWS_REGION_RESOLVED" ]; then
+        AWS_REGION_RESOLVED="${AWS_ZONE_RESOLVED%[a-z]}"
+    fi
+    if [ -z "$INSTANCE_ID_RESOLVED" ]; then
+        INSTANCE_ID_RESOLVED="$(metadata_value instance-id)"
+    fi
+
+    [[ "$AWS_REGION_RESOLVED" =~ ^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$ ]] ||
+        print_error "AWS region is invalid"
+    [[ "$AWS_ZONE_RESOLVED" =~ ^[a-z]{2}(-[a-z0-9]+)+-[0-9]+[a-z]$ ]] ||
+        print_error "EC2 availability zone is invalid"
+    [[ "$INSTANCE_ID_RESOLVED" =~ ^i-[0-9a-f]{8,32}$ ]] ||
+        print_error "EC2 instance ID is invalid"
+}
+
+aws_ec2() {
+    aws --no-cli-pager --region "$AWS_REGION_RESOLVED" ec2 "$@"
+}
+
+validate_volume_id() {
+    [[ "${1:-}" =~ ^vol-[0-9a-f]{8,32}$ ]] ||
+        print_error "EBS volume ID is invalid"
+}
+
+validate_name() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] ||
+        print_error "volume name contains unsupported characters"
+}
+
+validate_mount_destination() {
+    local destination="$1"
+    case "$destination" in
+        /var/lib/pasturestack/volumes/pasturestack-ebs/*)
+            ;;
+        *)
+            print_error "mount destination is outside the driver-owned directory"
+            ;;
+    esac
+}
+
+wait_for_device() {
+    local volume_id="$1"
+    local compact="${volume_id//-/}"
+    local candidate
+    local attempt
+
+    for attempt in $(seq 1 60); do
+        for candidate in \
+            "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${volume_id}" \
+            "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${compact}"; do
+            if [ -e "$candidate" ]; then
+                readlink -f -- "$candidate"
+                return 0
+            fi
+        done
+
+        candidate="$(
+            lsblk -dn -o PATH,SERIAL 2>/dev/null |
+                awk -v id="$volume_id" -v compact="$compact" '
+                    {
+                        serial=$2
+                        gsub(/-/, "", serial)
+                        if ($2 == id || serial == compact) {
+                            print $1
+                            exit
+                        }
+                    }
+                '
+        )"
+        if [ -n "$candidate" ] && [ -b "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        sleep 2
+    done
+
+    print_error "EBS block device did not appear within 120 seconds"
+}
+
+available_device_name() {
+    local used
+    local letter
+
+    used="$(
+        aws_ec2 describe-volumes \
+            --filters "Name=attachment.instance-id,Values=$INSTANCE_ID_RESOLVED" \
+            --query 'Volumes[].Attachments[].Device' \
+            --output text
+    )" || print_error "failed to list attached EBS volumes"
+
+    for letter in f g h i j k l m n o p; do
+        if [[ " $used " != *" /dev/sd$letter "* ]]; then
+            printf '/dev/sd%s\n' "$letter"
+            return 0
+        fi
+    done
+
+    print_error "no EBS attachment device name is available"
+}
+
+attach_volume() {
+    local volume_id="$1"
+    local attachment_instance
+    local attachment_state
+    local device_name
+
+    attachment_instance="$(
+        aws_ec2 describe-volumes \
+            --volume-ids "$volume_id" \
+            --query 'Volumes[0].Attachments[0].InstanceId' \
+            --output text
+    )" || print_error "failed to inspect EBS volume $volume_id"
+
+    attachment_state="$(
+        aws_ec2 describe-volumes \
+            --volume-ids "$volume_id" \
+            --query 'Volumes[0].Attachments[0].State' \
+            --output text
+    )" || print_error "failed to inspect EBS attachment state"
+
+    if [ "$attachment_instance" != "None" ] &&
+       [ "$attachment_instance" != "$INSTANCE_ID_RESOLVED" ]; then
+        print_error "EBS volume is attached to another instance"
+    fi
+
+    if [ "$attachment_instance" = "None" ]; then
+        device_name="$(available_device_name)"
+        aws_ec2 attach-volume \
+            --volume-id "$volume_id" \
+            --instance-id "$INSTANCE_ID_RESOLVED" \
+            --device "$device_name" >/dev/null ||
+            print_error "failed to attach EBS volume $volume_id"
+        aws_ec2 wait volume-in-use --volume-ids "$volume_id" ||
+            print_error "EBS volume did not become attached"
+    elif [ "$attachment_state" != "attached" ]; then
+        aws_ec2 wait volume-in-use --volume-ids "$volume_id" ||
+            print_error "EBS volume did not finish attaching"
+    fi
+
+    wait_for_device "$volume_id"
+}
+
+detach_volume() {
+    local volume_id="$1"
+    local attachment_instance
+
+    attachment_instance="$(
+        aws_ec2 describe-volumes \
+            --volume-ids "$volume_id" \
+            --query 'Volumes[0].Attachments[0].InstanceId' \
+            --output text
+    )" || print_error "failed to inspect EBS volume $volume_id"
+
+    if [ "$attachment_instance" = "$INSTANCE_ID_RESOLVED" ]; then
+        aws_ec2 detach-volume --volume-id "$volume_id" >/dev/null ||
+            print_error "failed to detach EBS volume $volume_id"
+        aws_ec2 wait volume-available --volume-ids "$volume_id" ||
+            print_error "EBS volume did not become available"
+    elif [ "$attachment_instance" != "None" ]; then
+        print_error "EBS volume is attached to another instance"
+    fi
+}
+
+init() {
+    local tool
+    for tool in aws curl jq lsblk mount mountpoint umount; do
+        command -v "$tool" >/dev/null 2>&1 ||
+            print_error "required tool is missing: $tool"
+    done
+    print_success
+}
+
+create() {
+    local name="${OPTS[name]:-}"
+    local volume_id="${OPTS[volumeID]:-}"
+    local size="${OPTS[size]:-}"
+    local volume_type="${OPTS[volumeType]:-gp3}"
+    local snapshot_id="${OPTS[snapshotID]:-}"
+    local kms_key_id="${OPTS[kmsKeyId]:-}"
+    local encrypted="${OPTS[encrypted]:-true}"
+    local device
+    local -a create_args
+
+    validate_name "$name"
+    if [ -n "$volume_id" ]; then
+        validate_volume_id "$volume_id"
+        print_success
+        return
+    fi
+
+    [ "${ALLOW_CLOUD_PROVISIONING:-false}" = "true" ] ||
+        print_error "cloud provisioning is disabled; supply an existing volumeID"
+    [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -ge 1 ] && [ "$size" -le 16384 ] ||
+        print_error "size must be an integer from 1 through 16384 GiB"
+    case "$volume_type" in
+        gp2|gp3|io1|io2|sc1|st1|standard)
+            ;;
+        *)
+            print_error "EBS volume type is unsupported"
+            ;;
+    esac
+    if [ -n "$snapshot_id" ]; then
+        [[ "$snapshot_id" =~ ^snap-[0-9a-f]{8,32}$ ]] ||
+            print_error "EBS snapshot ID is invalid"
+    fi
+    case "$encrypted" in
+        true|false)
+            ;;
+        *)
+            print_error "encrypted must be true or false"
+            ;;
+    esac
+    if [ -n "$kms_key_id" ] &&
+       [[ ! "$kms_key_id" =~ ^[A-Za-z0-9:/_.+-]{1,512}$ ]]; then
+        print_error "KMS key identifier is invalid"
+    fi
+
+    resolve_cloud_context
+    create_args=(
+        create-volume
+        --availability-zone "$AWS_ZONE_RESOLVED"
+        --size "$size"
+        --volume-type "$volume_type"
+        --query VolumeId
+        --output text
+    )
+    if [ -n "$snapshot_id" ]; then
+        create_args+=(--snapshot-id "$snapshot_id")
+    fi
+    if [ "$encrypted" = "true" ]; then
+        create_args+=(--encrypted)
+    fi
+    if [ -n "$kms_key_id" ]; then
+        create_args+=(--kms-key-id "$kms_key_id")
+    fi
+    if [ -n "${OPTS[iops]:-}" ]; then
+        [[ "${OPTS[iops]}" =~ ^[0-9]+$ ]] ||
+            print_error "IOPS must be an integer"
+        create_args+=(--iops "${OPTS[iops]}")
+    fi
+
+    volume_id="$(aws_ec2 "${create_args[@]}")" ||
+        print_error "failed to create EBS volume"
+    validate_volume_id "$volume_id"
+    aws_ec2 wait volume-available --volume-ids "$volume_id" ||
+        print_error "new EBS volume did not become available"
+    aws_ec2 create-tags \
+        --resources "$volume_id" \
+        --tags "Key=Name,Value=$name" >/dev/null ||
+        print_error "failed to tag new EBS volume"
+
+    device="$(attach_volume "$volume_id")"
+    if ! blkid -p "$device" >/dev/null 2>&1; then
+        mkfs.ext4 -F "$device" >/dev/null ||
+            print_error "failed to create an ext4 filesystem on the new EBS volume"
+    fi
+    detach_volume "$volume_id"
+
+    print_options \
+        created true \
+        volumeID "$volume_id" \
+        ec2_region "$AWS_REGION_RESOLVED" \
+        ec2_az "$AWS_ZONE_RESOLVED"
+}
+
+attach() {
+    local volume_id="${OPTS[volumeID]:-}"
+    local device
+
+    validate_volume_id "$volume_id"
+    resolve_cloud_context
+    device="$(attach_volume "$volume_id")"
+    print_device "$device"
+}
+
+detach() {
+    # Volumes remain attached after an application unmount so repeated mounts
+    # do not churn cloud attachments. Driver-owned volumes are detached by
+    # delete before the cloud resource is removed.
+    print_not_supported
+}
+
+mountdest() {
+    local fs_type="${OPTS[fs-type]:-${OPTS[kubernetes.io/fsType]:-ext4}}"
+    local options="${OPTS[mntOptions]:-}"
+    local -a mount_args
+
+    validate_mount_destination "$MNT_DEST"
+    [ -b "$DEVICE" ] || print_error "EBS device is not a block device"
+    case "$fs_type" in
+        ext2|ext3|ext4|xfs)
+            ;;
+        *)
+            print_error "filesystem type is unsupported"
+            ;;
+    esac
+    if [ -n "$options" ] &&
+       [[ ! "$options" =~ ^[A-Za-z0-9_.=,:+-]+$ ]]; then
+        print_error "mount options contain unsupported characters"
+    fi
+
+    mkdir -p -- "$MNT_DEST"
+    if [ "$(ismounted "$MNT_DEST")" = "0" ]; then
+        mount_args=(mount -t "$fs_type")
+        if [ -n "$options" ]; then
+            mount_args+=(-o "$options")
+        fi
+        mount_args+=("$DEVICE" "$MNT_DEST")
+        "${mount_args[@]}" ||
+            print_error "failed to mount EBS volume"
+    fi
+    print_success
+}
+
+unmount() {
+    validate_mount_destination "$MNT_DEST"
+    if [ "$(ismounted "$MNT_DEST")" = "1" ]; then
+        umount -- "$MNT_DEST" || print_error "failed to unmount EBS volume"
+    fi
+    print_success
+}
+
+delete() {
+    local volume_id="${OPTS[volumeID]:-}"
+    local described
+
+    if [ "${OPTS[created]:-false}" != "true" ]; then
+        print_success
+        return
+    fi
+    [ "${ALLOW_CLOUD_PROVISIONING:-false}" = "true" ] ||
+        print_error "cloud deletion is disabled"
+    validate_volume_id "$volume_id"
+    resolve_cloud_context
+
+    if ! described="$(aws_ec2 describe-volumes \
+        --volume-ids "$volume_id" \
+        --query 'Volumes[0].VolumeId' \
+        --output text 2>&1)"; then
+        if [[ "$described" == *"InvalidVolume.NotFound"* ]]; then
+            print_success
+            return
+        fi
+        print_error "failed to inspect EBS volume before deletion"
+    fi
+
+    detach_volume "$volume_id"
+    aws_ec2 delete-volume --volume-id "$volume_id" >/dev/null ||
+        print_error "failed to delete EBS volume"
+    print_success
+}
+
+main "$@"
