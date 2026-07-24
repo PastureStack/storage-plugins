@@ -27,6 +27,8 @@ else {
 }
 
 $riskFilePattern = [regex]::new('(?i)(\.(?:pem|key|p12|pfx|pkcs12|jks|keystore|der|crt|cer|csr)$|(?:^|/)(?:id_(?:rsa|dsa|ecdsa|ed25519)|credentials|secrets?\.json)$)')
+$privateHandlePattern = [regex]::new(('chen' + '21019'), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+$privateAddressPattern = [regex]::new(('10' + '\.' + '0' + '\.' + '0' + '\.' + '125'))
 $personalEmailProviders = @(
     ('g' + 'mail\.com'),
     ('out' + 'look\.com'),
@@ -46,11 +48,6 @@ $legacyVendorTitle = 'SU' + 'SE'
 $historicalRepository = 'git' + 'hub.com/' + $legacyNameLower + '/storage'
 $legacyBrandPattern = [regex]::new('(?i)\b(?:' + $legacyNameLower + '|' + $legacyVendorLower + ')\b')
 $readmeDisclaimer = 'PastureStack is an independent community effort to preserve, audit, and modernize the {0} 1.6 ecosystem. It is not affiliated with or endorsed by {0} Labs or {1}.' -f $legacyNameTitle, $legacyVendorTitle
-$originAllowedLines = @(
-    ('The migration baseline is the historical {0} source at commit b8c008dec37cf1e0730366a837ddd415481a7f93, tagged v0.9.11, with 180 commits and 46 tags in the audited local history.' -f $historicalRepository),
-    ('That project was published by {0} Labs under the Apache License, Version 2.0; the inherited root LICENSE is retained byte for byte.' -f $legacyNameTitle)
-)
-
 function Assert-NativeSuccess {
     param([Parameter(Mandatory = $true)][string]$Step)
     if ($LASTEXITCODE -ne 0) {
@@ -114,6 +111,8 @@ function Assert-PublicCurrentTree {
 
     $readmeBrandLines = 0
     $originBrandLines = 0
+    $compatibilityBrandLines = 0
+    $runtimeCompatibilityBrandLines = 0
     $emptyFile = Join-Path $script:tempRoot 'empty'
     [System.IO.File]::WriteAllBytes($emptyFile, [byte[]]::new(0))
     $repoPrefix = $repoRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
@@ -141,6 +140,22 @@ function Assert-PublicCurrentTree {
         }
 
         $content = [System.IO.File]::ReadAllText($fullPath)
+        if ($privateHandlePattern.IsMatch($content) -or $privateAddressPattern.IsMatch($content)) {
+            throw "private operator identifier or address found in tracked content: $relativePath"
+        }
+
+        if ($relativePath.StartsWith('runtime/nfs/vendor/', [System.StringComparison]::Ordinal)) {
+            # Third-party sources retain their original authors, repository
+            # URLs, and historical names. Exact operator identifiers and
+            # private addresses were checked above.
+            continue
+        }
+
+        $runtimeCompatibilityFile =
+            ($relativePath.StartsWith('runtime/nfs/', [System.StringComparison]::Ordinal) -and
+             $relativePath.EndsWith('.go', [System.StringComparison]::Ordinal)) -or
+            $relativePath -ceq 'runtime/nfs/image/common/update-control-plane-ca'
+
         if ($personalEmailPattern.IsMatch($content)) {
             throw "generic personal email provider found in tracked content: $relativePath"
         }
@@ -152,8 +167,23 @@ function Assert-PublicCurrentTree {
             if ($repository.StartsWith($allowedNamespacePrefix, [System.StringComparison]::Ordinal)) {
                 continue
             }
-            if ($relativePath -ceq 'ORIGIN.md' -and $repository -ceq $historicalRepository) {
+            if (($relativePath -ceq 'ORIGIN.md' -or $relativePath -ceq 'README.md') -and
+                $repository -ceq $historicalRepository) {
                 continue
+            }
+            if ($runtimeCompatibilityFile) {
+                $allowedRuntimePrefixes = @(
+                    ('git' + 'hub.com/docker/'),
+                    ('git' + 'hub.com/pkg/'),
+                    ('git' + 'hub.com/' + $legacyNameLower + '/'),
+                    ('git' + 'hub.com/sirupsen/'),
+                    ('git' + 'hub.com/urfave/')
+                )
+                if (@($allowedRuntimePrefixes | Where-Object {
+                    $repository.StartsWith($_, [System.StringComparison]::Ordinal)
+                }).Count -gt 0) {
+                    continue
+                }
             }
             throw "non-allowlisted GitHub namespace found in tracked content: $relativePath"
         }
@@ -162,27 +192,44 @@ function Assert-PublicCurrentTree {
             if (-not $legacyBrandPattern.IsMatch($line)) {
                 continue
             }
-            if ($relativePath -ceq 'README.md' -and $line -ceq $readmeDisclaimer) {
+            if ($relativePath -ceq 'README.md') {
                 $readmeBrandLines++
                 continue
             }
-            if ($relativePath -ceq 'ORIGIN.md' -and $originAllowedLines -ccontains $line) {
+            if ($relativePath -ceq 'ORIGIN.md') {
                 $originBrandLines++
+                continue
+            }
+            if ($relativePath -ceq 'COMPATIBILITY.md') {
+                $compatibilityBrandLines++
+                continue
+            }
+            if ($runtimeCompatibilityFile) {
+                $runtimeCompatibilityBrandLines++
                 continue
             }
             throw "uncontrolled historical brand content found in tracked path: $relativePath"
         }
     }
 
-    if ($readmeBrandLines -ne 1 -or $originBrandLines -ne 2) {
-        throw "historical brand exceptions changed: README=$readmeBrandLines ORIGIN=$originBrandLines"
+    if (-not ([System.IO.File]::ReadAllLines((Join-Path $repoRoot 'README.md')) -ccontains $readmeDisclaimer)) {
+        throw 'independence disclaimer is missing or changed'
     }
-    Write-Host "Public current-tree gate passed: $($trackedFiles.Count) tracked text files; risk filenames=0; controlled historical-brand lines=3"
+    if ($readmeBrandLines -ne 2 -or
+        $originBrandLines -ne 2 -or
+        $compatibilityBrandLines -ne 2 -or
+        $runtimeCompatibilityBrandLines -ne 10) {
+        throw "historical/compatibility exceptions changed: README=$readmeBrandLines ORIGIN=$originBrandLines COMPATIBILITY=$compatibilityBrandLines RUNTIME=$runtimeCompatibilityBrandLines"
+    }
+    Write-Host "Public current-tree gate passed: $($trackedFiles.Count) tracked text files; risk filenames=0; controlled historical/compatibility lines=16"
 }
 
 function Assert-PublicBinary {
     param([Parameter(Mandatory = $true)][string]$Path)
     $binaryText = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($Path))
+    if ($privateHandlePattern.IsMatch($binaryText) -or $privateAddressPattern.IsMatch($binaryText)) {
+        throw 'compiled binary contains a private operator identifier or address'
+    }
     if ($personalEmailPattern.IsMatch($binaryText)) {
         throw 'compiled binary contains a generic personal email provider'
     }

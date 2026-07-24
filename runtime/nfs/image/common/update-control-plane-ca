@@ -1,0 +1,50 @@
+#!/bin/bash
+set -euo pipefail
+
+# The default path is part of the inherited control-plane wire contract.
+CONTROL_PLANE_CA_ROOT="${CONTROL_PLANE_CA_ROOT:-/var/lib/rancher/etc/ssl/ca.crt}"
+JKS_STORE="${JAVA_CACERTS:-}"
+JAVA_STORE_PASS="${JAVA_STORE_PASS:-changeit}"
+SYSTEM_CA_DIR="/usr/local/share/ca-certificates/pasturestack"
+SYSTEM_CA_FILE="${SYSTEM_CA_DIR}/control-plane-ca.crt"
+JKS_ALIAS="pasturestack_control_plane_ca"
+
+if [ ! -f "$CONTROL_PLANE_CA_ROOT" ]; then
+  exit 0
+fi
+
+install -d -m 0755 "$SYSTEM_CA_DIR"
+install -m 0644 "$CONTROL_PLANE_CA_ROOT" "$SYSTEM_CA_FILE"
+update-ca-certificates
+
+if [ -z "$JKS_STORE" ]; then
+  for candidate in \
+    "${JAVA_HOME:-}/jre/lib/security/cacerts" \
+    "${JAVA_HOME:-}/lib/security/cacerts" \
+    "/etc/ssl/certs/java/cacerts"; do
+    if [ -f "$candidate" ]; then
+      JKS_STORE="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -n "$JKS_STORE" ] && command -v keytool >/dev/null 2>&1; then
+  if keytool -list \
+      -keystore "$JKS_STORE" \
+      -alias "$JKS_ALIAS" \
+      -storepass "$JAVA_STORE_PASS" >/dev/null 2>&1; then
+    keytool -delete \
+      -alias "$JKS_ALIAS" \
+      -storepass "$JAVA_STORE_PASS" \
+      -keystore "$JKS_STORE" \
+      -noprompt
+  fi
+
+  keytool -import -trustcacerts \
+    -file "$CONTROL_PLANE_CA_ROOT" \
+    -alias "$JKS_ALIAS" \
+    -keystore "$JKS_STORE" \
+    -storepass "$JAVA_STORE_PASS" \
+    -noprompt
+fi

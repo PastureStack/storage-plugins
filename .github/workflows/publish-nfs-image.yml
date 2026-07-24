@@ -1,0 +1,111 @@
+name: Publish NFS storage driver
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Validate release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - name: Check out exact public tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git clone \
+            --branch "$RELEASE_TAG" \
+            --depth 1 \
+            "https://github.com/${SOURCE_REPOSITORY}.git" \
+            .
+
+      - name: Validate source and scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/validate.sh
+          bash -n runtime/nfs/image/common/common.sh
+          bash -n runtime/nfs/image/common/start.sh
+          bash -n runtime/nfs/image/common/update-control-plane-ca
+          bash -n runtime/nfs/image/nfs/pasturestack-nfs
+
+      - name: Build exact semantic-version image
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg "IMAGE_VERSION=${RELEASE_TAG}" \
+            --file runtime/nfs/image/nfs/Dockerfile \
+            --tag "ghcr.io/pasturestack/nfs-storage-driver:${RELEASE_TAG}" \
+            .
+
+      - name: Smoke-test image and removal safeguards
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/pasturestack/nfs-storage-driver:${RELEASE_TAG}"
+          docker run --rm \
+            --entrypoint /usr/bin/pasturestack-storage-runtime \
+            "$image" \
+            --version |
+            grep -F "$RELEASE_TAG"
+          retained=$(
+            docker run --rm \
+              --entrypoint /usr/bin/pasturestack-nfs \
+              "$image" \
+              delete \
+              '{"name":"release-probe","host":"127.0.0.1","export":"/","onRemove":"purge"}'
+          )
+          printf '%s\n' "$retained" | grep -F '"message":"retained"'
+          if docker run --rm \
+            --entrypoint /usr/bin/pasturestack-nfs \
+            "$image" \
+            delete \
+            '{"name":"../unsafe","onRemove":"retain"}'; then
+            echo 'unsafe volume name was accepted' >&2
+            exit 1
+          fi
+          docker image inspect "$image" \
+            --format '{{index .Config.Labels "org.opencontainers.image.version"}}' |
+            grep -Fx "$RELEASE_TAG"
+
+      - name: Authenticate to GitHub Container Registry
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            docker login ghcr.io --username "$GHCR_USER" --password-stdin
+
+      - name: Publish exact semantic-version image
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          docker push "ghcr.io/pasturestack/nfs-storage-driver:${RELEASE_TAG}"
+          docker image inspect \
+            "ghcr.io/pasturestack/nfs-storage-driver:${RELEASE_TAG}" \
+            --format '{{json .RepoDigests}}'

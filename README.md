@@ -4,9 +4,16 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 
 # storage-plugins
 
-`storage-plugins` is an alpha, offline contract validator and deterministic lifecycle planner for storage integrations. It preserves capability and state-transition intent without connecting to storage systems or changing host or cloud state.
+`storage-plugins` contains two deliberately separated deliverables:
 
-This repository does not contain a runtime storage driver. It produces validation results and blocked `would-*` plans only.
+- an alpha, offline contract validator and deterministic lifecycle planner; and
+- the reviewed NFS compatibility runtime published as
+  `ghcr.io/pasturestack/nfs-storage-driver:<semantic-version>`.
+
+The planner preserves capability and state-transition intent without connecting
+to storage systems or changing host or cloud state. The NFS runtime is isolated
+under [`runtime/nfs`](runtime/nfs/README.md), has a separate build boundary, and
+is the only privileged runtime delivered by this repository.
 
 ## Driver contracts
 
@@ -22,7 +29,7 @@ The current contract surface contains exactly seven driver identifiers:
 
 The identifiers are new contracts, not compatibility aliases. Driver-specific fields, operation support, and delegated components are documented in [COMPATIBILITY.md](COMPATIBILITY.md).
 
-## Safety boundary
+## Planner safety boundary
 
 The planner never executes a lifecycle action. Every generated step has `status: "blocked"`, every plan has `executable: false` and `effect: "none"`, and every runtime control is reported as `false`:
 
@@ -35,7 +42,13 @@ The planner never executes a lifecycle action. Every generated step has `status:
 
 An irreversible-action acknowledgement changes diagnostic context only; it never enables execution. See [SECURITY.md](SECURITY.md) for the threat model and reporting guidance.
 
-A module-root AST gate recursively checks every production Go file, including files added under new package directories. Production imports are restricted to the reviewed standard-library set and module-local packages. The CLI entry point is the only production file allowed to import `os`, and only `Args`, `Stdin`, `Stdout`, `Stderr`, and `Exit` selectors are permitted.
+An AST gate recursively checks every planner production Go file, including
+files added under new planner package directories. The separately versioned
+`runtime/nfs` module has its own container-build and script gates. Planner
+imports are restricted to the reviewed standard-library set and module-local
+packages. The CLI entry point is the only planner file allowed to import `os`,
+and only `Args`, `Stdin`, `Stdout`, `Stderr`, and `Exit` selectors are
+permitted.
 
 ## CLI
 
@@ -86,6 +99,29 @@ sh scripts/validate.sh
 
 The test suite covers all seven driver contracts, strict JSON behavior, the lifecycle table, ownership and generation gates, deterministic idempotency, irreversible-action blocking, locale parity, and forbidden dangerous imports or calls.
 
+## NFS runtime
+
+Build the exact release candidate from the repository root:
+
+```sh
+docker build \
+  --build-arg IMAGE_VERSION=v0.9.13 \
+  --file runtime/nfs/image/nfs/Dockerfile \
+  --tag nfs-storage-driver:v0.9.13 \
+  .
+```
+
+Operational templates always reference a semantic version tag. Release
+verification records may retain the resolved digest, but digest-qualified image
+references are intentionally excluded from Catalog, Compose, API, and UI data.
+
+The runtime defaults to retaining data. `purge` removes only a validated
+driver-owned subdirectory; a directly supplied NFS export is always treated as
+externally managed and is never recursively purged.
+
 ## License and provenance
 
-The inherited root [`LICENSE`](LICENSE) remains unchanged. Go toolchain notices are kept separately in [`LICENSES/`](LICENSES/). See [ORIGIN.md](ORIGIN.md) for the source, deletion, and distribution boundaries.
+The inherited root [`LICENSE`](LICENSE) remains unchanged. Go toolchain notices
+are kept separately in [`LICENSES/`](LICENSES/), and vendored runtime license
+files remain beside their corresponding dependencies. See
+[ORIGIN.md](ORIGIN.md) for the source and distribution boundaries.

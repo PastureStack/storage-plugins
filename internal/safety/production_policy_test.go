@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	moduleImportPath    = "github.com/PastureStack/storage-plugins"
-	cliEntryPath        = "cmd/storage-plugins/main.go"
-	gitMetadataRootPath = ".git"
+	moduleImportPath          = "github.com/PastureStack/storage-plugins"
+	cliEntryPath              = "cmd/storage-plugins/main.go"
+	gitMetadataRootPath       = ".git"
+	isolatedRuntimeModulePath = "runtime/nfs"
 )
 
 var allowedProductionImports = map[string]struct{}{
@@ -121,10 +122,14 @@ func TestProductionGoPolicyAllowsRequiredCLISelectors(t *testing.T) {
 	}
 }
 
-func TestProductionGoPolicySkipsOnlyGitMetadataAndTests(t *testing.T) {
+func TestProductionGoPolicySkipsGitMetadataTestsAndIsolatedRuntime(t *testing.T) {
 	root := t.TempDir()
 	evil := "package ignored\nimport \"os/exec\"\nvar _ = exec.Command\n"
-	for _, relative := range []string{".git/evil.go", "pkg/evil_test.go"} {
+	for _, relative := range []string{
+		".git/evil.go",
+		"pkg/evil_test.go",
+		isolatedRuntimeModulePath + "/adapter.go",
+	} {
 		writeGoFixture(t, root, relative, evil)
 	}
 	findings, err := scanProductionGo(root)
@@ -164,7 +169,9 @@ func scanProductionGo(root string) ([]string, error) {
 				if err != nil {
 					return err
 				}
-				if filepath.ToSlash(relativeDirectory) == gitMetadataRootPath {
+				relativeDirectory = filepath.ToSlash(relativeDirectory)
+				if relativeDirectory == gitMetadataRootPath ||
+					relativeDirectory == isolatedRuntimeModulePath {
 					return filepath.SkipDir
 				}
 			}

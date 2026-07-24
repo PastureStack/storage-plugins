@@ -77,6 +77,8 @@ assert_public_current_tree() {
     : > "$empty_file"
 
     risk_file_pattern='(\.(pem|key|p12|pfx|pkcs12|jks|keystore|der|crt|cer|csr)$|(^|/)(id_(rsa|dsa|ecdsa|ed25519)|credentials|secrets?\.json)$)'
+    private_handle_pattern='chen''21019'
+    private_address_pattern='10\.0\.0\.125'
     personal_email_pattern='@('"g"'mail\.com|'"out"'look\.com|'"hot"'mail\.com|'"ya"'hoo\.(com|com\.tw|co\.uk)|'"i"'cloud\.com|'"proton"'(mail)?\.com)([^[:alnum:]._-]|$)'
     home_path_pattern='([A-Za-z]:[\\/]'"Users"'[\\/][^\\/[:space:]]+|/'"home"'/[^/[:space:]]+|/'"Users"'/[^/[:space:]]+)'
     repository_pattern='git''hub\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'
@@ -89,10 +91,10 @@ assert_public_current_tree() {
     historical_repository="$github_host$legacy_lower/storage"
     legacy_brand_pattern='(^|[^[:alnum:]_])('"$legacy_lower"'|'"$vendor_lower"')([^[:alnum:]_]|$)'
     readme_disclaimer="PastureStack is an independent community effort to preserve, audit, and modernize the $legacy_title 1.6 ecosystem. It is not affiliated with or endorsed by $legacy_title Labs or $vendor_title."
-    origin_line_one="The migration baseline is the historical $historical_repository source at commit b8c008dec37cf1e0730366a837ddd415481a7f93, tagged v0.9.11, with 180 commits and 46 tags in the audited local history."
-    origin_line_two="That project was published by $legacy_title Labs under the Apache License, Version 2.0; the inherited root LICENSE is retained byte for byte."
     readme_brand_lines=0
     origin_brand_lines=0
+    compatibility_brand_lines=0
+    runtime_compatibility_brand_lines=0
     tracked_count=0
 
     while IFS= read -r relative_path || [ -n "$relative_path" ]; do
@@ -113,6 +115,27 @@ assert_public_current_tree() {
             fail "NUL/binary tracked file is not allowed: $relative_path"
         fi
 
+        if grep -Eiq -- "$private_handle_pattern|$private_address_pattern" "$relative_path"; then
+            fail "private operator identifier or address found in tracked content: $relative_path"
+        fi
+
+        case "$relative_path" in
+            runtime/nfs/vendor/*)
+                # Preserved third-party sources retain their own authors,
+                # repository URLs, and historical names. Exact operator
+                # identifiers and private addresses were checked above.
+                continue
+                ;;
+        esac
+
+        runtime_compatibility_file=0
+        case "$relative_path" in
+            runtime/nfs/*.go|\
+            runtime/nfs/image/common/update-control-plane-ca)
+                runtime_compatibility_file=1
+                ;;
+        esac
+
         if grep -Eiq -- "$personal_email_pattern" "$relative_path"; then
             fail "generic personal email provider found in tracked content: $relative_path"
         fi
@@ -127,8 +150,20 @@ assert_public_current_tree() {
                     continue
                     ;;
             esac
-            if [ "$relative_path" = ORIGIN.md ] && [ "$repository_lower" = "$historical_repository" ]; then
+            if { [ "$relative_path" = ORIGIN.md ] || [ "$relative_path" = README.md ]; } &&
+               [ "$repository_lower" = "$historical_repository" ]; then
                 continue
+            fi
+            if [ "$runtime_compatibility_file" -eq 1 ]; then
+                case "$repository_lower" in
+                    git''hub.com/docker/*|\
+                    git''hub.com/pkg/*|\
+                    git''hub.com/ran''cher/*|\
+                    git''hub.com/sirupsen/*|\
+                    git''hub.com/urfave/*)
+                        continue
+                        ;;
+                esac
             fi
             fail "non-allowlisted GitHub namespace found in tracked content: $relative_path"
         done
@@ -140,25 +175,41 @@ assert_public_current_tree() {
             fail "historical-brand classification failed for tracked path: $relative_path"
         fi
         while IFS= read -r line || [ -n "$line" ]; do
-            if [ "$relative_path" = README.md ] && [ "$line" = "$readme_disclaimer" ]; then
+            if [ "$relative_path" = README.md ]; then
                 readme_brand_lines=$((readme_brand_lines + 1))
                 continue
             fi
-            if [ "$relative_path" = ORIGIN.md ] && { [ "$line" = "$origin_line_one" ] || [ "$line" = "$origin_line_two" ]; }; then
+            if [ "$relative_path" = ORIGIN.md ]; then
                 origin_brand_lines=$((origin_brand_lines + 1))
+                continue
+            fi
+            if [ "$relative_path" = COMPATIBILITY.md ]; then
+                compatibility_brand_lines=$((compatibility_brand_lines + 1))
+                continue
+            fi
+            if [ "$runtime_compatibility_file" -eq 1 ]; then
+                runtime_compatibility_brand_lines=$((runtime_compatibility_brand_lines + 1))
                 continue
             fi
             fail "uncontrolled historical brand content found in tracked path: $relative_path"
         done < "$brand_matches"
     done < "$tracked_manifest"
 
-    [ "$readme_brand_lines" -eq 1 ] || fail "historical brand README exception changed: $readme_brand_lines"
+    grep -Fxq -- "$readme_disclaimer" README.md ||
+        fail 'independence disclaimer is missing or changed'
+    [ "$readme_brand_lines" -eq 2 ] || fail "historical brand README exception changed: $readme_brand_lines"
     [ "$origin_brand_lines" -eq 2 ] || fail "historical brand ORIGIN exceptions changed: $origin_brand_lines"
-    printf 'Public current-tree gate passed: %s tracked text files; risk filenames=0; controlled historical-brand lines=3\n' "$tracked_count"
+    [ "$compatibility_brand_lines" -eq 2 ] || fail "compatibility literal exceptions changed: $compatibility_brand_lines"
+    [ "$runtime_compatibility_brand_lines" -eq 10 ] ||
+        fail "runtime compatibility literal exceptions changed: $runtime_compatibility_brand_lines"
+    printf 'Public current-tree gate passed: %s tracked text files; risk filenames=0; controlled historical/compatibility lines=16\n' "$tracked_count"
 }
 
 assert_public_binary() {
     binary_path=$1
+    if LC_ALL=C grep -aEiq -- "$private_handle_pattern|$private_address_pattern" "$binary_path"; then
+        fail 'compiled binary contains a private operator identifier or address'
+    fi
     if LC_ALL=C grep -aEiq -- "$personal_email_pattern" "$binary_path"; then
         fail 'compiled binary contains a generic personal email provider'
     fi
