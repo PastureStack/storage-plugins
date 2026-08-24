@@ -1,4 +1,4 @@
-ARG GO_IMAGE=golang:1.26.5-bookworm
+ARG GO_IMAGE=golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466
 ARG RUNTIME_IMAGE=ubuntu:26.04
 ARG IMAGE_VERSION=v0.9.13
 

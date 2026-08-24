@@ -1,0 +1,22 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/PastureStack/storage-plugins/security/openvex/2026-08-25",
+  "author": "PastureStack contributors",
+  "timestamp": "2026-08-25T04:40:49+08:00",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-39824"
+      },
+      "products": [
+        {
+          "@id": "pkg:golang/golang.org/x/sys@v0.13.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "component_not_present",
+      "impact_statement": "The v0.13.0 reference is unused upstream module metadata embedded beside the vendored logrus source. The compatibility runtime builds in GOPATH vendor mode against the exact golang.org/x/sys v0.47.0 source recorded in runtime/nfs/go.mod, so v0.13.0 is not present in the product. The affected NewNTUnicodeString symbol is Windows-only, while all three maintained storage runtime images are Linux binaries. A Go 1.27 binary-mode govulncheck scan reports zero vulnerabilities."
+    }
+  ]
+}
