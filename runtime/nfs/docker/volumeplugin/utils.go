@@ -3,10 +3,9 @@ package volumeplugin
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
-	"github.com/docker/go-plugins-helpers/volume"
-	"github.com/pkg/errors"
-	"github.com/rancher/go-rancher/v2"
+	"github.com/PastureStack/storage-plugins/runtime/nfs/internal/controlplane"
 	"github.com/sirupsen/logrus"
 )
 
@@ -14,22 +13,27 @@ import (
 // control plane. It is not a product or image name.
 const legacyManagedMarkerKey = "rancher"
 
-func logRequest(action string, request *volume.Request) {
+func logRequest(action, name string, options map[string]string) {
 	fields := logrus.Fields{}
-	if request.Name != "" {
-		fields["name"] = request.Name
+	if name != "" {
+		fields["name"] = name
 	}
-	if len(request.Options) > 0 {
-		fields["options"] = request.Options
+	if len(options) > 0 {
+		keys := make([]string, 0, len(options))
+		for key := range options {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		fields["optionKeys"] = keys
 	}
 	logrus.WithFields(fields).Infof("%s.request", action)
 }
 
-func logResponse(action, name string, response *volume.Response, output *CmdOutput) {
+func logResponse(action, name, mountpoint string, responseErr error, output *CmdOutput) {
 	fields := logrus.Fields{}
 	fields["name"] = name
-	if response.Mountpoint != "" {
-		fields["mountpoint"] = response.Mountpoint
+	if mountpoint != "" {
+		fields["mountpoint"] = mountpoint
 	}
 	if output.Message != "" {
 		fields["message"] = output.Message
@@ -37,34 +41,15 @@ func logResponse(action, name string, response *volume.Response, output *CmdOutp
 	if output.Status != "" {
 		fields["status"] = output.Status
 	}
-	if response.Err != "" {
-		fields["error"] = response.Err
+	if responseErr != nil {
+		fields["error"] = responseErr.Error()
 		logrus.WithFields(fields).Errorf("%s.response", action)
 	} else {
 		logrus.WithFields(fields).Infof("%s.response", action)
 	}
 }
 
-func volErr2(message string, err error) volume.Response {
-	return volume.Response{
-		Err: errors.Wrap(err, message).Error(),
-	}
-}
-
-func volErr(err error) volume.Response {
-	return volume.Response{
-		Err: err.Error(),
-	}
-}
-
-func errorToResponse(err error) volume.Response {
-	logrus.Errorf("Error response: %v", err)
-	return volume.Response{
-		Err: err.Error(),
-	}
-}
-
-func getOptions(vol *client.Volume) map[string]string {
+func getOptions(vol *controlplane.Volume) map[string]string {
 	if vol == nil {
 		return nil
 	}

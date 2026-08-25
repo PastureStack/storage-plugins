@@ -9,12 +9,14 @@ dependencies, and embedded secret-delivery snapshots. None of those sources is
 imported, compiled, linked, or distributed by the offline
 `storage-plugins` planner.
 
-The NFS-only runtime was subsequently restored from the audited v0.9.11 working
-tree as a reviewed maintenance change. Its historical third-party source and
-license files are retained under `runtime/nfs/vendor`; its image, executable,
-driver, documentation, and newly maintained identifiers use the PastureStack
-namespace. Block, cloud, and secret-delivery runtime snapshots were not
-restored.
+The NFS-only runtime behavior was subsequently restored from the audited
+v0.9.11 working tree as a reviewed maintenance change. Obsolete Docker
+engine-api, Kubernetes monolith, and control-plane SDK dependencies were then
+replaced by maintained modules and a small same-origin client limited to the
+required schemas and actions. Current third-party source and license files are
+recorded under `runtime/nfs/vendor`; the image, executable, driver,
+documentation, and maintained identifiers use the PastureStack namespace.
+Block, cloud, and secret-delivery runtime snapshots were not restored.
 
 The planner remains an offline, standard-library implementation. The privileged
 NFS adapter is a separate Docker build target and is not imported by the

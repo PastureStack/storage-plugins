@@ -31,11 +31,17 @@ can communicate with the preserved server and node agent:
 - `CATTLE_URL`, `CATTLE_ACCESS_KEY`, and `CATTLE_SECRET_KEY`;
 - the `/var/lib/rancher/volumes` and `/var/run/rancher/storage` host paths;
 - the `rancher` managed-volume marker carried in the legacy API payload; and
-- upstream Go package paths and exported type names inside vendored clients.
+- the preserved `volume`, `storageDriver`, and `host` schema names and required
+  API fields and actions.
 
 These values are compatibility identifiers, not branding claims. They are not
 used as a repository name, image name, driver name, Catalog title, logo, or
 visible product label.
+
+The runtime no longer embeds the historical control-plane SDK, Docker
+engine-api client, or Kubernetes monolith. A small module-local client handles
+only the schema operations listed above, and the Docker and mount integrations
+use their maintained module packages.
 
 The runtime has these destructive-operation constraints:
 

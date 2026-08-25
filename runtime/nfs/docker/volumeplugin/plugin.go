@@ -1,29 +1,25 @@
 package volumeplugin
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"k8s.io/kubernetes/pkg/util/exec"
-	"k8s.io/kubernetes/pkg/util/mount"
-
-	"github.com/docker/docker/pkg/locker"
-	dockerClient "github.com/docker/engine-api/client"
-	"github.com/docker/engine-api/types"
-	"github.com/docker/engine-api/types/events"
+	"github.com/PastureStack/storage-plugins/runtime/nfs/internal/controlplane"
 	"github.com/docker/go-plugins-helpers/volume"
-	"github.com/pkg/errors"
-	"github.com/rancher/go-rancher/v2"
+	mobyevents "github.com/moby/moby/api/types/events"
+	dockerClient "github.com/moby/moby/client"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
+	mount "k8s.io/mount-utils"
+	utilexec "k8s.io/utils/exec"
 )
 
-var errNoSuchVolume = errors.New("No such volume")
+var errNoSuchVolume = errors.New("no such volume")
 
 const (
 	k8sFsType               = "kubernetes.io/fsType"
@@ -34,7 +30,7 @@ const (
 	state                   = "state"
 )
 
-func NewControlPlaneStorageDriver(driver string, client *client.RancherClient, cli *dockerClient.Client) (*ControlPlaneStorageDriver, error) {
+func NewControlPlaneStorageDriver(driver string, client *controlplane.Client, cli *dockerClient.Client) (*ControlPlaneStorageDriver, error) {
 	state, err := NewControlPlaneState(driver, client)
 	if err != nil {
 		return nil, err
@@ -47,16 +43,16 @@ func NewControlPlaneStorageDriver(driver string, client *client.RancherClient, c
 		Command:             driver,
 		client:              client,
 		state:               state,
-		mounter:             &mount.SafeFormatAndMount{Interface: mount.New(), Runner: exec.New()},
+		mounter:             mount.NewSafeFormatAndMount(mount.New(""), utilexec.New()),
 		FsType:              DefaultFsType,
 		cli:                 cli,
 		SaveOnAttach:        false,
 		mountMap:            map[string]map[string]struct{}{},
-		lock:                locker.New(),
+		lock:                newKeyedLocker(),
 		ManagedControlPlane: managedDrivers[driver],
 	}
 	if err := d.init(); err != nil {
-		return nil, errors.Wrap(err, "Failed to initialize")
+		return nil, fmt.Errorf("failed to initialize: %w", err)
 	}
 	go syncMountMap(d, cli)
 	d.kickGC()
@@ -70,7 +66,7 @@ type ControlPlaneStorageDriver struct {
 	Scope               string
 	CreateSupported     bool
 	Command             string
-	client              *client.RancherClient
+	client              *controlplane.Client
 	state               *ControlPlaneState
 	mounter             *mount.SafeFormatAndMount
 	FsType              string
@@ -79,7 +75,7 @@ type ControlPlaneStorageDriver struct {
 	SaveOnAttach        bool
 	mountMap            map[string]map[string]struct{}
 	mountMapLock        sync.RWMutex
-	lock                *locker.Locker
+	lock                *keyedLocker
 	ManagedControlPlane bool
 }
 
@@ -88,24 +84,22 @@ func (d *ControlPlaneStorageDriver) init() error {
 	return err
 }
 
-func (d *ControlPlaneStorageDriver) Create(request volume.Request) volume.Response {
+func (d *ControlPlaneStorageDriver) Create(request *volume.CreateRequest) (responseErr error) {
 	// we need to lock the name to make create idempotency
 	if d.ManagedControlPlane {
 		d.lock.Lock(request.Name)
 		defer d.lock.Unlock(request.Name)
 	}
 
-	logRequest("create", &request)
+	logRequest("create", request.Name, request.Options)
 
-	response := volume.Response{}
 	output := &CmdOutput{}
-	defer logResponse("create", request.Name, &response, output)
+	defer func() { logResponse("create", request.Name, "", responseErr, output) }()
 
 	if created, err := d.state.IsCreated(request.Name); err != nil {
-		response.Err = err.Error()
-		return response
+		return err
 	} else if created {
-		return response
+		return nil
 	}
 
 	result := request.Options
@@ -113,61 +107,47 @@ func (d *ControlPlaneStorageDriver) Create(request volume.Request) volume.Respon
 		var err error
 		*output, err = d.exec("create", toArgs(request.Name, request.Options))
 		if err != nil {
-			response.Err = err.Error()
-			return response
+			return err
 		}
 		result = fold(result, output.Options)
 	}
 
 	if err := d.state.Save(request.Name, result, 0); err != nil {
 		logrus.Errorf("Save volume name=%s failed, err: %s", request.Name, err)
-		d.exec("delete", toArgs(request.Name, result))
-		response.Err = err.Error()
-		return response
+		_, _ = d.exec("delete", toArgs(request.Name, result))
+		return err
 	}
 
-	return response
+	return nil
 }
 
-func (d *ControlPlaneStorageDriver) List(request volume.Request) volume.Response {
-	response := volume.Response{}
+func (d *ControlPlaneStorageDriver) List() (*volume.ListResponse, error) {
 	volumes, err := d.state.List()
 	if err != nil {
-		response.Err = err.Error()
-	} else {
-		response.Volumes = volumes
+		return nil, err
 	}
-
-	return response
+	return &volume.ListResponse{Volumes: volumes}, nil
 }
 
-func (d *ControlPlaneStorageDriver) Get(request volume.Request) volume.Response {
-	response := volume.Response{}
+func (d *ControlPlaneStorageDriver) Get(request *volume.GetRequest) (*volume.GetResponse, error) {
 	vol, _, err := d.state.Get(request.Name)
 	if err != nil {
-		response.Err = err.Error()
-		return response
+		return nil, err
 	}
-	if vol != nil {
-		response.Volume = vol
-	}
-
-	return response
+	return &volume.GetResponse{Volume: vol}, nil
 }
 
-func (d *ControlPlaneStorageDriver) Remove(request volume.Request) volume.Response {
-	logRequest("remove", &request)
+func (d *ControlPlaneStorageDriver) Remove(request *volume.RemoveRequest) (responseErr error) {
+	logRequest("remove", request.Name, nil)
 
-	response := volume.Response{}
 	output := &CmdOutput{}
-	defer logResponse("remove", request.Name, &response, output)
+	defer func() { logResponse("remove", request.Name, "", responseErr, output) }()
 
 	_, rVol, err := d.state.Get(request.Name)
 	if err == errNoSuchVolume {
-		return volume.Response{}
+		return nil
 	} else if err != nil {
-		response.Err = err.Error()
-		return response
+		return err
 	}
 
 	// Docker removal is deferred until the control plane starts resource removal.
@@ -175,12 +155,11 @@ func (d *ControlPlaneStorageDriver) Remove(request volume.Request) volume.Respon
 		var err error
 		*output, err = d.exec("delete", toArgs(request.Name, getOptions(rVol)))
 		if err != nil {
-			response.Err = err.Error()
-			return response
+			return err
 		}
 	}
 
-	return response
+	return nil
 }
 
 func (d *ControlPlaneStorageDriver) isMounted(path string) (bool, error) {
@@ -200,14 +179,14 @@ func (d *ControlPlaneStorageDriver) isMounted(path string) (bool, error) {
 func (d *ControlPlaneStorageDriver) doAttach(name, opts string) (*CmdOutput, error) {
 	cmdOutput, err := d.exec("attach", opts)
 	if err != nil && err != errNotSupported {
-		logrus.Errorf("Failed to attach, opts==%s: %v", opts, err)
+		logrus.Errorf("Failed to attach %s: %v", name, err)
 		return nil, err
 	}
 
 	return &cmdOutput, nil
 }
 
-func (d *ControlPlaneStorageDriver) Attach(request AttachRequest) volume.Response {
+func (d *ControlPlaneStorageDriver) Attach(request AttachRequest) (response AttachResponse) {
 	d.mountLock.Lock()
 	defer d.mountLock.Unlock()
 
@@ -215,9 +194,14 @@ func (d *ControlPlaneStorageDriver) Attach(request AttachRequest) volume.Respons
 		"name": request.Name,
 	}).Info("attach.request")
 
-	response := volume.Response{}
 	output := &CmdOutput{}
-	defer logResponse("attach", request.Name, &response, output)
+	defer func() {
+		var err error
+		if response.Err != "" {
+			err = errors.New(response.Err)
+		}
+		logResponse("attach", request.Name, "", err, output)
+	}()
 
 	_, rVol, err := d.state.Get(request.Name)
 	if err != nil {
@@ -246,7 +230,7 @@ func (d *ControlPlaneStorageDriver) Attach(request AttachRequest) volume.Respons
 	return response
 }
 
-func (d *ControlPlaneStorageDriver) Mount(request volume.MountRequest) volume.Response {
+func (d *ControlPlaneStorageDriver) Mount(request *volume.MountRequest) (response *volume.MountResponse, responseErr error) {
 	d.mountLock.Lock()
 	defer d.mountLock.Unlock()
 
@@ -254,47 +238,54 @@ func (d *ControlPlaneStorageDriver) Mount(request volume.MountRequest) volume.Re
 		"name": request.Name,
 	}).Info("mount.request")
 
-	response := volume.Response{}
+	response = &volume.MountResponse{}
 	output := &CmdOutput{}
-	defer logResponse("mount", request.Name, &response, output)
+	defer func() {
+		mountpoint := ""
+		if response != nil {
+			mountpoint = response.Mountpoint
+		}
+		logResponse("mount", request.Name, mountpoint, responseErr, output)
+	}()
 
 	_, rVol, err := d.state.Get(request.Name)
 	if err != nil {
-		response.Err = err.Error()
-		return response
+		return nil, err
 	}
 
-	mntDest := d.getMntDest(request.Name)
+	mntDest, err := d.getMntDest(request.Name)
+	if err != nil {
+		return nil, err
+	}
 	if mounted, err := d.isMounted(mntDest); err != nil {
-		response.Err = errors.Wrap(err, "checking mounts").Error()
-		return response
+		return nil, fmt.Errorf("checking mounts: %w", err)
 	} else if mounted {
 		logrus.Infof("%s already mounted on %s", request.Name, mntDest)
 		response.Mountpoint = mntDest
-		return response
+		return response, nil
 	}
 
 	opts := toArgs(request.Name, getOptions(rVol))
 	output, err = d.doAttach(request.Name, opts)
 	if err != nil && err != errNotSupported {
 		logrus.Errorf("Failed to attach %s: %v", request.Name, err)
-		response.Err = err.Error()
-		return response
+		return nil, err
 	}
 
-	os.MkdirAll(mntDest, 0750)
+	if err := os.MkdirAll(mntDest, 0750); err != nil {
+		return nil, err
+	}
 	*output, err = d.exec("mount", mntDest, output.Device, opts)
 	if err != nil {
 		logrus.Errorf("Failed to mount %s: %v", request.Name, err)
-		response.Err = err.Error()
-		return response
+		return nil, err
 	}
 
 	response.Mountpoint = mntDest
-	return response
+	return response, nil
 }
 
-func (d *ControlPlaneStorageDriver) getFsType(vol *client.Volume) string {
+func (d *ControlPlaneStorageDriver) getFsType(vol *controlplane.Volume) string {
 	fsType, _ := vol.DriverOpts[fsType].(string)
 	if fsType == "" {
 		fsType, _ = vol.DriverOpts[k8sFsType].(string)
@@ -305,16 +296,15 @@ func (d *ControlPlaneStorageDriver) getFsType(vol *client.Volume) string {
 	return fsType
 }
 
-func (d *ControlPlaneStorageDriver) Unmount(request volume.UnmountRequest) volume.Response {
+func (d *ControlPlaneStorageDriver) Unmount(request *volume.UnmountRequest) (responseErr error) {
 	logrus.WithFields(logrus.Fields{
 		"name": request.Name,
 	}).Info("unmount.request")
 
-	response := volume.Response{}
-	defer logResponse("unmount", request.Name, &response, &CmdOutput{})
+	defer func() { logResponse("unmount", request.Name, "", responseErr, &CmdOutput{}) }()
 
 	d.kickGC()
-	return response
+	return nil
 }
 
 func (d *ControlPlaneStorageDriver) unmount(mntDest string) error {
@@ -324,15 +314,15 @@ func (d *ControlPlaneStorageDriver) unmount(mntDest string) error {
 	logrus.Infof("Unmounting %s", mntDest)
 	device, refCount, err := mount.GetDeviceNameFromMount(d.mounter, mntDest)
 	if err != nil {
-		return errors.Wrapf(err, "find device %s", mntDest)
+		return fmt.Errorf("find device %s: %w", mntDest, err)
 	}
 
 	if _, err := d.exec("unmount", mntDest); err == errNotSupported {
 		if err := d.mounter.Unmount(mntDest); err != nil {
-			return errors.Wrapf(err, "umount with mounter %s", mntDest)
+			return fmt.Errorf("unmount with mounter %s: %w", mntDest, err)
 		}
 	} else if err != nil {
-		return errors.Wrapf(err, "umount %s", mntDest)
+		return fmt.Errorf("unmount %s: %w", mntDest, err)
 	}
 
 	if refCount != 1 {
@@ -341,15 +331,15 @@ func (d *ControlPlaneStorageDriver) unmount(mntDest string) error {
 
 	logrus.Infof("Detaching %s", device)
 	if _, err := d.exec("detach", device); err != nil && err != errNotSupported {
-		return errors.Wrapf(err, "detach %s", device)
+		return fmt.Errorf("detach %s: %w", device, err)
 	}
 
 	if _, err := os.Stat(mntDest); err == nil {
 		if notmnt, err := d.mounter.IsLikelyNotMountPoint(mntDest); err != nil {
-			return errors.Wrap(err, "Lookup mount")
+			return fmt.Errorf("look up mount: %w", err)
 		} else if notmnt {
 			if err := os.Remove(mntDest); err != nil {
-				return errors.Wrapf(err, "delete %s", mntDest)
+				return fmt.Errorf("delete %s: %w", mntDest, err)
 			}
 		}
 	}
@@ -358,26 +348,49 @@ func (d *ControlPlaneStorageDriver) unmount(mntDest string) error {
 	return nil
 }
 
-func (d *ControlPlaneStorageDriver) Path(request volume.Request) volume.Response {
-	return volume.Response{
-		Mountpoint: d.getMntDest(request.Name),
+func (d *ControlPlaneStorageDriver) Path(request *volume.PathRequest) (*volume.PathResponse, error) {
+	mountpoint, err := d.getMntDest(request.Name)
+	if err != nil {
+		return nil, err
 	}
+	return &volume.PathResponse{
+		Mountpoint: mountpoint,
+	}, nil
 }
 
-func (d *ControlPlaneStorageDriver) Capabilities(volume.Request) volume.Response {
-	return volume.Response{
+func (d *ControlPlaneStorageDriver) Capabilities() *volume.CapabilitiesResponse {
+	return &volume.CapabilitiesResponse{
 		Capabilities: volume.Capability{
 			Scope: d.Scope,
 		},
 	}
 }
 
-func (d *ControlPlaneStorageDriver) getMntDest(name string) string {
-	return filepath.Join(d.getMntRoot(), name)
+func (d *ControlPlaneStorageDriver) getMntDest(name string) (string, error) {
+	if name == "" || name == "." || name == ".." || len(name) > 255 ||
+		strings.ContainsAny(name, "/\\") || strings.IndexFunc(name, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return "", errors.New("volume name is not safe for a mount path")
+	}
+	root := d.getMntRoot()
+	destination := filepath.Join(root, name)
+	if !pathWithinRoot(root, destination) {
+		return "", errors.New("volume mount path escaped the driver root")
+	}
+	return destination, nil
 }
 
 func (d *ControlPlaneStorageDriver) getMntRoot() string {
 	return filepath.Join(d.Basedir, d.DriverName)
+}
+
+func pathWithinRoot(root, candidate string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
+	if err != nil || relative == "." || filepath.IsAbs(relative) {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (d *ControlPlaneStorageDriver) kickGC() {
@@ -399,7 +412,7 @@ func (d *ControlPlaneStorageDriver) gc() error {
 	toUnmount := map[string]bool{}
 	toCheck := map[string]bool{}
 	for _, mount := range mounts {
-		if strings.HasPrefix(mount.Path, mntRoot) {
+		if pathWithinRoot(mntRoot, mount.Path) {
 			toCheck[mount.Path] = true
 		}
 	}
@@ -436,7 +449,7 @@ func (d *ControlPlaneStorageDriver) gc() error {
 }
 
 func (d *ControlPlaneStorageDriver) ListAllVolumes() ([]*volume.Volume, error) {
-	vols, err := d.state.client.Volume.List(&client.ListOpts{
+	vols, err := d.state.client.Volume.List(&controlplane.ListOpts{
 		Filters: map[string]interface{}{
 			"removed_null":    "true",
 			"limit":           "-1",
@@ -455,61 +468,65 @@ func (d *ControlPlaneStorageDriver) ListAllVolumes() ([]*volume.Volume, error) {
 
 func (d *ControlPlaneStorageDriver) watchContainerEvents() error {
 	for {
-		reader, err := d.cli.Events(context.Background(), types.EventsOptions{})
-		if err != nil {
-			logrus.Error(err)
-			continue
-		}
-		defer reader.Close()
-
-		scanner := bufio.NewScanner(reader)
-		for scanner.Scan() {
-			var event events.Message
-			if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-				logrus.Errorf("Failed to unmarshal %s: %v", scanner.Text(), err)
-			}
-			if event.Status == "destroy" {
-				logrus.Infof("container %s destroyed", event.ID)
-				d.mountMapLock.Lock()
-				for _, mountsMap := range d.mountMap {
-					delete(mountsMap, event.ID)
+		ctx, cancel := context.WithCancel(context.Background())
+		result := d.cli.Events(ctx, dockerClient.EventsListOptions{})
+	stream:
+		for {
+			select {
+			case event, ok := <-result.Messages:
+				if !ok {
+					break stream
 				}
-				d.mountMapLock.Unlock()
-				d.kickGC()
-			} else if event.Status == "start" {
-				inspect, err := d.cli.ContainerInspect(context.Background(), event.ID)
-				if err != nil {
-					logrus.Errorf("failed to inspect new created container, err: %v", err)
-					continue
-				}
-				d.mountMapLock.Lock()
-				for _, mount := range inspect.Mounts {
-					if strings.HasPrefix(mount.Source, d.getMntRoot()) {
-						if ids, ok := d.mountMap[mount.Source]; ok {
-							ids[event.ID] = struct{}{}
-						} else {
-							d.mountMap[mount.Source] = map[string]struct{}{}
-							d.mountMap[mount.Source][event.ID] = struct{}{}
+				if event.Action == mobyevents.ActionDestroy {
+					logrus.Infof("container %s destroyed", event.Actor.ID)
+					d.mountMapLock.Lock()
+					for _, mountsMap := range d.mountMap {
+						delete(mountsMap, event.Actor.ID)
+					}
+					d.mountMapLock.Unlock()
+					d.kickGC()
+				} else if event.Action == mobyevents.ActionStart {
+					inspect, err := d.cli.ContainerInspect(context.Background(), event.Actor.ID, dockerClient.ContainerInspectOptions{})
+					if err != nil {
+						logrus.Errorf("failed to inspect new created container, err: %v", err)
+						continue
+					}
+					d.mountMapLock.Lock()
+					for _, mount := range inspect.Container.Mounts {
+						if pathWithinRoot(d.getMntRoot(), mount.Source) {
+							if ids, ok := d.mountMap[mount.Source]; ok {
+								ids[event.Actor.ID] = struct{}{}
+							} else {
+								d.mountMap[mount.Source] = map[string]struct{}{}
+								d.mountMap[mount.Source][event.Actor.ID] = struct{}{}
+							}
 						}
 					}
+					d.mountMapLock.Unlock()
 				}
-				d.mountMapLock.Unlock()
+			case err, ok := <-result.Err:
+				if ok && err != nil && !errors.Is(err, context.Canceled) {
+					logrus.Errorf("Docker event stream stopped: %v", err)
+				}
+				break stream
 			}
 		}
+		cancel()
 		time.Sleep(2 * time.Second)
 	}
 }
 
 func syncMountMap(d *ControlPlaneStorageDriver, cli *dockerClient.Client) {
 	for {
-		containers, err := cli.ContainerList(context.Background(), types.ContainerListOptions{})
+		containers, err := cli.ContainerList(context.Background(), dockerClient.ContainerListOptions{})
 		if err != nil {
+			time.Sleep(time.Second)
 			continue
 		}
 		d.mountMapLock.Lock()
-		for _, container := range containers {
+		for _, container := range containers.Items {
 			for _, mount := range container.Mounts {
-				if strings.HasPrefix(mount.Source, d.getMntRoot()) {
+				if pathWithinRoot(d.getMntRoot(), mount.Source) {
 					if ids, ok := d.mountMap[mount.Source]; ok {
 						ids[container.ID] = struct{}{}
 					} else {

@@ -1,14 +1,15 @@
 package volumeplugin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 
+	"github.com/PastureStack/storage-plugins/runtime/nfs/internal/controlplane"
 	"github.com/docker/go-plugins-helpers/volume"
-	"github.com/pkg/errors"
-	"github.com/rancher/go-rancher-metadata/metadata"
-	"github.com/rancher/go-rancher/v2"
 	"github.com/sirupsen/logrus"
 )
 
@@ -34,20 +35,20 @@ var managedDrivers = map[string]bool{
 }
 
 type ControlPlaneState struct {
-	client   *client.RancherClient
+	client   *controlplane.Client
 	driver   string
 	hostID   string
 	driverID string
 }
 
-func NewControlPlaneState(driver string, client *client.RancherClient) (*ControlPlaneState, error) {
+func NewControlPlaneState(driver string, client *controlplane.Client) (*ControlPlaneState, error) {
 	host, err := getHostID(client)
 	if err != nil {
-		return nil, errors.Wrap(err, "getting host ID")
+		return nil, fmt.Errorf("getting host ID: %w", err)
 	}
 	driverID, err := getDriverID(driver, client)
 	if err != nil {
-		return nil, errors.Wrap(err, "getting driver ID")
+		return nil, fmt.Errorf("getting driver ID: %w", err)
 	}
 
 	logrus.Infof("Running on host %s(%s) with driver %s(%s)", host.Hostname, host.Id, driver, driverID)
@@ -75,7 +76,7 @@ func (r *ControlPlaneState) Save(name string, options map[string]string, try int
 	_, vol, err := r.getAny(name)
 	for tries := 1; err != nil; tries++ {
 		if tries == 30 {
-			return errors.Wrap(err, "Max tries reached")
+			return fmt.Errorf("maximum retries reached: %w", err)
 		}
 
 		_, vol, err = r.getAny(name)
@@ -92,7 +93,7 @@ func (r *ControlPlaneState) Save(name string, options map[string]string, try int
 		}
 	}
 
-	opts := &client.Volume{
+	opts := &controlplane.Volume{
 		Name:            name,
 		Driver:          r.driver,
 		StorageDriverId: r.driverID,
@@ -123,7 +124,7 @@ func (r *ControlPlaneState) Save(name string, options map[string]string, try int
 }
 
 func (r *ControlPlaneState) List() ([]*volume.Volume, error) {
-	vols, err := r.client.Volume.List(&client.ListOpts{
+	vols, err := r.client.Volume.List(&controlplane.ListOpts{
 		Filters: map[string]interface{}{
 			"removed_null":    "true",
 			"limit":           "-1",
@@ -143,12 +144,12 @@ func (r *ControlPlaneState) List() ([]*volume.Volume, error) {
 	return result, nil
 }
 
-func isCreated(driver string, vol client.Volume) bool {
+func isCreated(driver string, vol controlplane.Volume) bool {
 	return goodStates[vol.State]
 }
 
-func (r *ControlPlaneState) getAny(name string) (*volume.Volume, *client.Volume, error) {
-	vols, err := r.client.Volume.List(&client.ListOpts{
+func (r *ControlPlaneState) getAny(name string) (*volume.Volume, *controlplane.Volume, error) {
+	vols, err := r.client.Volume.List(&controlplane.ListOpts{
 		Filters: map[string]interface{}{
 			"name":            name,
 			"removed_null":    "true",
@@ -166,8 +167,8 @@ func (r *ControlPlaneState) getAny(name string) (*volume.Volume, *client.Volume,
 	return volToVol(vols.Data[0]), &vols.Data[0], nil
 }
 
-func (r *ControlPlaneState) Get(name string) (*volume.Volume, *client.Volume, error) {
-	vols, err := r.client.Volume.List(&client.ListOpts{
+func (r *ControlPlaneState) Get(name string) (*volume.Volume, *controlplane.Volume, error) {
+	vols, err := r.client.Volume.List(&controlplane.ListOpts{
 		Filters: map[string]interface{}{
 			"name":            name,
 			"removed_null":    "true",
@@ -191,7 +192,7 @@ func (r *ControlPlaneState) Get(name string) (*volume.Volume, *client.Volume, er
 	return nil, nil, errNoSuchVolume
 }
 
-func volToVol(vol client.Volume) *volume.Volume {
+func volToVol(vol controlplane.Volume) *volume.Volume {
 	result := &volume.Volume{
 		Name:   vol.Name,
 		Status: map[string]interface{}{},
@@ -211,8 +212,8 @@ func toMapInterface(data map[string]string) map[string]interface{} {
 	return result
 }
 
-func getDriverID(driver string, c *client.RancherClient) (string, error) {
-	drivers, err := c.StorageDriver.List(&client.ListOpts{
+func getDriverID(driver string, c *controlplane.Client) (string, error) {
+	drivers, err := c.StorageDriver.List(&controlplane.ListOpts{
 		Filters: map[string]interface{}{
 			"name":         driver,
 			"removed_null": true,
@@ -227,22 +228,57 @@ func getDriverID(driver string, c *client.RancherClient) (string, error) {
 	return drivers.Data[0].Id, nil
 }
 
-func getHostID(c *client.RancherClient) (*client.Host, error) {
-	m, err := metadata.NewClientAndWait(metadataURL)
-	if err != nil {
-		return nil, errors.Wrap(err, "initializing metadata")
-	}
-	mHost, err := m.GetSelfHost()
+func getHostID(c *controlplane.Client) (*controlplane.Host, error) {
+	hostUUID, err := getSelfHostUUID(metadataURL)
 	if err != nil {
 		return nil, err
 	}
-	hosts, err := c.Host.List(&client.ListOpts{
+	hosts, err := c.Host.List(&controlplane.ListOpts{
 		Filters: map[string]interface{}{
-			"uuid": mHost.UUID,
+			"uuid": hostUUID,
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
 	if len(hosts.Data) != 1 {
-		return nil, fmt.Errorf("Failed to find current host %s, got %d host(s)", mHost.UUID, len(hosts.Data))
+		return nil, fmt.Errorf("failed to find current host %s, got %d host(s)", hostUUID, len(hosts.Data))
 	}
 	return &hosts.Data[0], nil
+}
+
+func getSelfHostUUID(baseURL string) (string, error) {
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/self/host", nil)
+		if err == nil {
+			request.Header.Set("Accept", "application/json")
+			response, requestErr := http.DefaultClient.Do(request)
+			if requestErr == nil {
+				body, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+				response.Body.Close()
+				if response.StatusCode == http.StatusOK && readErr == nil {
+					var host struct {
+						UUID string `json:"uuid"`
+					}
+					if json.Unmarshal(body, &host) == nil && host.UUID != "" {
+						cancel()
+						return host.UUID, nil
+					}
+				}
+				lastErr = fmt.Errorf("metadata returned HTTP %d", response.StatusCode)
+			} else {
+				lastErr = requestErr
+			}
+		} else {
+			lastErr = err
+		}
+		cancel()
+		if time.Now().Add(time.Second).After(deadline) {
+			return "", fmt.Errorf("metadata service did not become ready: %w", lastErr)
+		}
+		time.Sleep(time.Second)
+	}
 }

@@ -11,7 +11,7 @@ const (
 )
 
 type ExtDriver interface {
-	Attach(AttachRequest) volume.Response
+	Attach(AttachRequest) AttachResponse
 }
 
 type AttachRequest struct {
@@ -19,10 +19,14 @@ type AttachRequest struct {
 	ID   string
 }
 
-type attachActionHandler func(AttachRequest) volume.Response
+type AttachResponse struct {
+	Err string
+}
+
+type attachActionHandler func(AttachRequest) AttachResponse
 
 func ExtendHandler(h *volume.Handler, d ExtDriver) {
-	handleAttach(h, attachPath, func(req AttachRequest) volume.Response {
+	handleAttach(h, attachPath, func(req AttachRequest) AttachResponse {
 		return d.Attach(req)
 	})
 }
@@ -34,6 +38,6 @@ func handleAttach(h *volume.Handler, name string, actionCall attachActionHandler
 			return
 		}
 		res := actionCall(req)
-		sdk.EncodeResponse(w, res, res.Err)
+		sdk.EncodeResponse(w, res, res.Err != "")
 	})
 }

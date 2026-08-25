@@ -154,6 +154,8 @@ function Assert-PublicCurrentTree {
         $runtimeCompatibilityFile =
             ($relativePath.StartsWith('runtime/nfs/', [System.StringComparison]::Ordinal) -and
              $relativePath.EndsWith('.go', [System.StringComparison]::Ordinal)) -or
+            $relativePath -ceq 'runtime/nfs/go.mod' -or
+            $relativePath -ceq 'runtime/nfs/go.sum' -or
             $relativePath -ceq 'runtime/nfs/image/common/update-control-plane-ca'
 
         if ($personalEmailPattern.IsMatch($content)) {
@@ -173,10 +175,19 @@ function Assert-PublicCurrentTree {
             }
             if ($runtimeCompatibilityFile) {
                 $allowedRuntimePrefixes = @(
+                    ('git' + 'hub.com/cespare/'),
+                    ('git' + 'hub.com/containerd/'),
+                    ('git' + 'hub.com/coreos/'),
+                    ('git' + 'hub.com/distribution/'),
                     ('git' + 'hub.com/docker/'),
-                    ('git' + 'hub.com/pkg/'),
-                    ('git' + 'hub.com/' + $legacyNameLower + '/'),
+                    ('git' + 'hub.com/felixge/'),
+                    ('git' + 'hub.com/go-logr/'),
+                    ('git' + 'hub.com/google/'),
+                    ('git' + 'hub.com/microsoft/'),
+                    ('git' + 'hub.com/moby/'),
+                    ('git' + 'hub.com/opencontainers/'),
                     ('git' + 'hub.com/sirupsen/'),
+                    ('git' + 'hub.com/stretchr/'),
                     ('git' + 'hub.com/urfave/')
                 )
                 if (@($allowedRuntimePrefixes | Where-Object {
@@ -218,10 +229,10 @@ function Assert-PublicCurrentTree {
     if ($readmeBrandLines -ne 2 -or
         $originBrandLines -ne 2 -or
         $compatibilityBrandLines -ne 2 -or
-        $runtimeCompatibilityBrandLines -ne 8) {
+        $runtimeCompatibilityBrandLines -ne 2) {
         throw "historical/compatibility exceptions changed: README=$readmeBrandLines ORIGIN=$originBrandLines COMPATIBILITY=$compatibilityBrandLines RUNTIME=$runtimeCompatibilityBrandLines"
     }
-    Write-Host "Public current-tree gate passed: $($trackedFiles.Count) tracked text files; risk filenames=0; controlled historical/compatibility lines=14"
+    Write-Host "Public current-tree gate passed: $($trackedFiles.Count) tracked text files; risk filenames=0; controlled historical/compatibility lines=8"
 }
 
 function Assert-PublicBinary {

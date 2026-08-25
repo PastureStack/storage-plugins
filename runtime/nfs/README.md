@@ -23,14 +23,16 @@ Run from the repository root:
 
 ```sh
 docker build \
-  --build-arg IMAGE_VERSION=v0.9.13 \
+  --build-arg IMAGE_VERSION=v0.11.0 \
   --file runtime/nfs/image/nfs/Dockerfile \
-  --tag nfs-storage-driver:v0.9.13 \
+  --tag nfs-storage-driver:v0.11.0 \
   .
 ```
 
-The release image uses Ubuntu 26.04 and contains an amd64-compatible static Go
-runtime plus the NFS client utilities.
+The runtime builds as a Go 1.27 module from the checked-in vendor graph. Release
+images use the digest-pinned Alpine 3.23 stable base and exact package versions.
+The EBS and EFS variants use the AWS CLI package maintained for that stable
+base; updating the base and its package pins is one reviewable change.
 
 ## Runtime contract
 

@@ -81,7 +81,7 @@ Plans have a deterministic `sha256:` identifier derived from normalized semantic
 
 ## Build and test
 
-The core uses Go 1.26 and only the standard library:
+The core uses Go 1.27 and only the standard library:
 
 ```sh
 go test ./...
@@ -113,9 +113,9 @@ Build an exact NFS release candidate from the repository root:
 
 ```sh
 docker build \
-  --build-arg IMAGE_VERSION=v0.9.13 \
+  --build-arg IMAGE_VERSION=v0.11.0 \
   --file runtime/nfs/image/nfs/Dockerfile \
-  --tag nfs-storage-driver:v0.9.13 \
+  --tag nfs-storage-driver:v0.11.0 \
   .
 ```
 
@@ -126,6 +126,9 @@ references are intentionally excluded from Catalog, Compose, API, and UI data.
 The runtime defaults to retaining data. `purge` removes only a validated
 driver-owned subdirectory; a directly supplied NFS export is always treated as
 externally managed and is never recursively purged.
+
+The runtime is a Go 1.27 module. Its NFS, EBS, and EFS release candidates use a
+digest-pinned Alpine 3.23 stable base with exact runtime package versions.
 
 ## License and provenance
 

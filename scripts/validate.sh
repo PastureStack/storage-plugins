@@ -131,6 +131,8 @@ assert_public_current_tree() {
         runtime_compatibility_file=0
         case "$relative_path" in
             runtime/nfs/*.go|\
+            runtime/nfs/go.mod|\
+            runtime/nfs/go.sum|\
             runtime/nfs/image/common/update-control-plane-ca)
                 runtime_compatibility_file=1
                 ;;
@@ -156,10 +158,19 @@ assert_public_current_tree() {
             fi
             if [ "$runtime_compatibility_file" -eq 1 ]; then
                 case "$repository_lower" in
+                    git''hub.com/cespare/*|\
+                    git''hub.com/containerd/*|\
+                    git''hub.com/coreos/*|\
+                    git''hub.com/distribution/*|\
                     git''hub.com/docker/*|\
-                    git''hub.com/pkg/*|\
-                    git''hub.com/ran''cher/*|\
+                    git''hub.com/felixge/*|\
+                    git''hub.com/go-logr/*|\
+                    git''hub.com/google/*|\
+                    git''hub.com/microsoft/*|\
+                    git''hub.com/moby/*|\
+                    git''hub.com/opencontainers/*|\
                     git''hub.com/sirupsen/*|\
+                    git''hub.com/stretchr/*|\
                     git''hub.com/urfave/*)
                         continue
                         ;;
@@ -200,9 +211,9 @@ assert_public_current_tree() {
     [ "$readme_brand_lines" -eq 2 ] || fail "historical brand README exception changed: $readme_brand_lines"
     [ "$origin_brand_lines" -eq 2 ] || fail "historical brand ORIGIN exceptions changed: $origin_brand_lines"
     [ "$compatibility_brand_lines" -eq 2 ] || fail "compatibility literal exceptions changed: $compatibility_brand_lines"
-    [ "$runtime_compatibility_brand_lines" -eq 8 ] ||
+    [ "$runtime_compatibility_brand_lines" -eq 2 ] ||
         fail "runtime compatibility literal exceptions changed: $runtime_compatibility_brand_lines"
-    printf 'Public current-tree gate passed: %s tracked text files; risk filenames=0; controlled historical/compatibility lines=14\n' "$tracked_count"
+    printf 'Public current-tree gate passed: %s tracked text files; risk filenames=0; controlled historical/compatibility lines=8\n' "$tracked_count"
 }
 
 assert_public_binary() {
