@@ -8,7 +8,7 @@ require (
 	github.com/docker/go-plugins-helpers v0.0.0-20240701071450-45e2431495c8
 	github.com/moby/moby/api v1.55.0
 	github.com/moby/moby/client v0.5.1
-	github.com/sirupsen/logrus v1.10.1
+	github.com/sirupsen/logrus v1.10.2
 	github.com/urfave/cli/v3 v3.11.0
 	k8s.io/mount-utils v0.36.4
 	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
