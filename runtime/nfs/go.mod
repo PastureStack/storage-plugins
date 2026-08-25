@@ -1,6 +1,8 @@
 module github.com/PastureStack/storage-plugins/runtime/nfs
 
-go 1.27
+go 1.26.0
+
+toolchain go1.27.0
 
 require (
 	github.com/docker/go-plugins-helpers v0.0.0-20240701071450-45e2431495c8
