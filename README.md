@@ -15,6 +15,10 @@ to storage systems or changing host or cloud state. The storage runtime is isola
 under [`runtime/nfs`](runtime/nfs/README.md), has a separate build boundary, and
 is the only privileged runtime delivered by this repository.
 
+The current public NFS, Amazon EBS, and Amazon EFS release is `v0.10.0`.
+Runtime source in this tree targets the next numeric candidate, `v0.11.0`;
+the candidate build command below does not imply that an image was published.
+
 ## Driver contracts
 
 The current contract surface contains exactly seven driver identifiers:
