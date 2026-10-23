@@ -154,3 +154,13 @@ files remain beside their corresponding dependencies. See
 ## October 2026 security maintenance
 
 Maintained Go builds select the patched Go 1.27.3 compiler without raising the existing Go language requirement. Alpine 3.23 runtime images pin `ca-certificates 20261020-r0`. Release artifacts must pass the repository's existing checks before publication.
+
+## Full-severity release policy
+
+Release verification retains the complete runtime vulnerability report. Every
+finding with an official fix blocks release, regardless of severity. Unknown
+findings block unless a separately reviewed, exact not-affected statement is
+proved by the actual product dependency graph. LOW/MEDIUM findings without an
+official fix require the repository's exact CVE/package/version/PURL review ledger;
+new or changed findings fail closed. This policy-only update does not replace any
+already published immutable artifact.
