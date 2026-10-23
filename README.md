@@ -15,9 +15,19 @@ to storage systems or changing host or cloud state. The storage runtime is isola
 under [`runtime/nfs`](runtime/nfs/README.md), has a separate build boundary, and
 is the only privileged runtime delivered by this repository.
 
-Existing `v0.11.0` image coordinates are immutable and are not overwritten. The next coordinated NFS, Amazon EBS, and Amazon EFS security release is `v0.11.1`.
-Runtime source in this tree targets the next numeric candidate, `v0.11.1`;
-the candidate build command below does not imply that an image was published.
+Existing `v0.11.0` image coordinates are not overwritten. The current coordinated
+[NFS, EBS and EFS release is v0.11.1](https://github.com/PastureStack/storage-plugins/releases/tag/v0.11.1),
+produced from `a1ea8a0b483c9f8755cd23a4040cac06eafbb474`. The exact published
+registry digests passed [runtime readback, contract and security checks](https://github.com/PastureStack/storage-plugins/actions/runs/39964036727)
+and are recorded in the release's `registry-images.jsonl`; a local candidate build
+is not a substitute for those published bytes.
+
+The single official publisher is `.github/workflows/security-build.yml`. An
+annotated numeric tag runs all three runtime builds, contracts and vulnerability
+scans before the dependent publisher loads those same checksum-verified OCI
+archives. It checks all destination tags before publishing any member, then
+records registry digests. The separate legacy NFS/AWS push-tag publishers have
+been retired; they must not independently rebuild or publish release images.
 
 ## Driver contracts
 
@@ -144,3 +154,13 @@ files remain beside their corresponding dependencies. See
 ## October 2026 security maintenance
 
 Maintained Go builds select the patched Go 1.27.3 compiler without raising the existing Go language requirement. Alpine 3.23 runtime images pin `ca-certificates 20261020-r0`. Release artifacts must pass the repository's existing checks before publication.
+
+## Full-severity release policy
+
+Release verification retains the complete runtime vulnerability report. Every
+finding with an official fix blocks release, regardless of severity. Unknown
+findings block unless a separately reviewed, exact not-affected statement is
+proved by the actual product dependency graph. LOW/MEDIUM findings without an
+official fix require the repository's exact CVE/package/version/PURL review ledger;
+new or changed findings fail closed. This policy-only update does not replace any
+already published immutable artifact.
