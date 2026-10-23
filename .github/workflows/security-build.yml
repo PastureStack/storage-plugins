@@ -37,7 +37,7 @@ jobs:
           sh scripts/validate.sh
           for driver in nfs ebs efs; do
             docker build --build-arg IMAGE_VERSION=v0.11.0 -f runtime/nfs/image/$driver/Dockerfile -t local/$driver-storage-driver .
-            docker run --rm --entrypoint sh local/$driver-storage-driver -c 'test "$(apk info -v ca-certificates)" = ca-certificates-20261020-r0'
+            docker run --rm --entrypoint sh local/$driver-storage-driver -c 'apk info --installed ca-certificates=20261020-r0 >/dev/null && apk info --installed musl=1.2.5-r24 >/dev/null && apk info --installed zlib=1.3.2-r1 >/dev/null'
           done
       - name: Retain the exact verified runtime
         shell: bash
