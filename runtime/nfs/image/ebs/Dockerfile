@@ -1,4 +1,4 @@
-ARG GO_IMAGE=golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466
+ARG GO_IMAGE=golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
 ARG RUNTIME_IMAGE=alpine:3.23@sha256:1beb0dc0a51de7ff38e3b5274078a2e0b81113ba5c7535e1a03d5913a5edbda3
 ARG IMAGE_VERSION=v0.11.0
 
@@ -21,14 +21,18 @@ LABEL org.opencontainers.image.source="https://github.com/PastureStack/storage-p
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${IMAGE_VERSION}"
 RUN apk add --no-cache \
+    libcrypto3=3.5.9-r0 libssl3=3.5.9-r0 \
+        musl=1.2.5-r24 \
+        musl-utils=1.2.5-r24 \
+        zlib=1.3.2-r1 \
         aws-cli=2.32.7-r0 \
         bash=5.3.3-r1 \
-        ca-certificates=20260611-r0 \
-        curl=8.20.0-r0 \
+        ca-certificates=20261020-r0 \
+        curl=8.22.0-r0 \
         e2fsprogs=1.47.3-r0 \
-        jq=1.8.1-r0 \
+        jq=1.8.2-r0 \
         nvme-cli=2.16-r1 \
-        util-linux=2.41.4-r0
+        util-linux=2.41.6-r1
 COPY --from=runtime-build /out/pasturestack-storage-runtime /usr/bin/
 COPY runtime/nfs/image/ebs/pasturestack-ebs runtime/nfs/image/common/* /usr/bin/
 RUN chmod 0755 \
