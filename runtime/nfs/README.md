@@ -23,9 +23,9 @@ Run from the repository root:
 
 ```sh
 docker build \
-  --build-arg IMAGE_VERSION=v0.11.0 \
+  --build-arg IMAGE_VERSION=v0.11.1 \
   --file runtime/nfs/image/nfs/Dockerfile \
-  --tag nfs-storage-driver:v0.11.0 \
+  --tag nfs-storage-driver:v0.11.1 \
   .
 ```
 
