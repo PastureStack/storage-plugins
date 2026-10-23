@@ -19,6 +19,13 @@ Existing `v0.11.0` image coordinates are immutable and are not overwritten. The 
 Runtime source in this tree targets the next numeric candidate, `v0.11.1`;
 the candidate build command below does not imply that an image was published.
 
+The single official publisher is `.github/workflows/security-build.yml`. An
+annotated numeric tag runs all three runtime builds, contracts and vulnerability
+scans before the dependent publisher loads those same checksum-verified OCI
+archives. It checks all destination tags before publishing any member, then
+records registry digests. The separate legacy NFS/AWS push-tag publishers have
+been retired; they must not independently rebuild or publish release images.
+
 ## Driver contracts
 
 The current contract surface contains exactly seven driver identifiers:
