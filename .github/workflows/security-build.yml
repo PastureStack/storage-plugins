@@ -36,7 +36,23 @@ jobs:
           test "$(go env GOVERSION)" = go1.27.3
           sh scripts/validate.sh
           for driver in nfs ebs efs; do
-            docker build -f runtime/nfs/image/$driver/Dockerfile -t local/$driver-storage-driver .
+            docker build --build-arg IMAGE_VERSION=v0.11.0 -f runtime/nfs/image/$driver/Dockerfile -t local/$driver-storage-driver .
             docker run --rm --entrypoint sh local/$driver-storage-driver -c 'test "$(apk info -v ca-certificates)" = ca-certificates-20261020-r0'
           done
+      - name: Retain the exact verified runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/security-runtime
+          docker image inspect local/nfs-storage-driver local/ebs-storage-driver local/efs-storage-driver > dist/security-runtime/images.json
+          docker save local/nfs-storage-driver local/ebs-storage-driver local/efs-storage-driver | gzip -n > dist/security-runtime/images.tar.gz
+          printf '%s\n' "$GITHUB_SHA" > dist/security-runtime/source-revision.txt
+          (cd dist/security-runtime && sha256sum images.json images.tar.gz source-revision.txt > SHA256SUMS)
+      - name: Upload verified runtime and checksums
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-runtime-${{ github.sha }}
+          path: dist/security-runtime/
+          if-no-files-found: error
+          retention-days: 14
 
