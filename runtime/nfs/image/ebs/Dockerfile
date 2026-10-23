@@ -24,11 +24,11 @@ RUN apk add --no-cache \
         aws-cli=2.32.7-r0 \
         bash=5.3.3-r1 \
         ca-certificates=20261020-r0 \
-        curl=8.20.0-r0 \
+        curl=8.22.0-r0 \
         e2fsprogs=1.47.3-r0 \
-        jq=1.8.1-r0 \
+        jq=1.8.2-r0 \
         nvme-cli=2.16-r1 \
-        util-linux=2.41.4-r0
+        util-linux=2.41.6-r1
 COPY --from=runtime-build /out/pasturestack-storage-runtime /usr/bin/
 COPY runtime/nfs/image/ebs/pasturestack-ebs runtime/nfs/image/common/* /usr/bin/
 RUN chmod 0755 \

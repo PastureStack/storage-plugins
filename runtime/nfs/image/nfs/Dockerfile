@@ -23,11 +23,11 @@ LABEL org.opencontainers.image.source="https://github.com/PastureStack/storage-p
 RUN apk add --no-cache \
         bash=5.3.3-r1 \
         ca-certificates=20261020-r0 \
-        curl=8.20.0-r0 \
-        jq=1.8.1-r0 \
+        curl=8.22.0-r0 \
+        jq=1.8.2-r0 \
         nfs-utils=2.6.4-r6 \
         rpcbind=1.2.8-r0 \
-        util-linux=2.41.4-r0
+        util-linux=2.41.6-r1
 COPY --from=runtime-build /out/pasturestack-storage-runtime /usr/bin/
 COPY runtime/nfs/image/nfs/pasturestack-nfs runtime/nfs/image/common/* /usr/bin/
 RUN chmod 0755 \
