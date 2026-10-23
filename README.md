@@ -15,9 +15,12 @@ to storage systems or changing host or cloud state. The storage runtime is isola
 under [`runtime/nfs`](runtime/nfs/README.md), has a separate build boundary, and
 is the only privileged runtime delivered by this repository.
 
-Existing `v0.11.0` image coordinates are immutable and are not overwritten. The next coordinated NFS, Amazon EBS, and Amazon EFS security release is `v0.11.1`.
-Runtime source in this tree targets the next numeric candidate, `v0.11.1`;
-the candidate build command below does not imply that an image was published.
+Existing `v0.11.0` image coordinates are not overwritten. The current coordinated
+[NFS, EBS and EFS release is v0.11.1](https://github.com/PastureStack/storage-plugins/releases/tag/v0.11.1),
+produced from `a1ea8a0b483c9f8755cd23a4040cac06eafbb474`. The exact published
+registry digests passed [runtime readback, contract and security checks](https://github.com/PastureStack/storage-plugins/actions/runs/39964036727)
+and are recorded in the release's `registry-images.jsonl`; a local candidate build
+is not a substitute for those published bytes.
 
 The single official publisher is `.github/workflows/security-build.yml`. An
 annotated numeric tag runs all three runtime builds, contracts and vulnerability
