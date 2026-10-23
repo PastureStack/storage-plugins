@@ -15,7 +15,7 @@ to storage systems or changing host or cloud state. The storage runtime is isola
 under [`runtime/nfs`](runtime/nfs/README.md), has a separate build boundary, and
 is the only privileged runtime delivered by this repository.
 
-The current public NFS, Amazon EBS, and Amazon EFS release is `v0.10.0`.
+The current public NFS, Amazon EBS, and Amazon EFS release is `v0.11.0`.
 Runtime source in this tree targets the next numeric candidate, `v0.11.0`;
 the candidate build command below does not imply that an image was published.
 
@@ -140,3 +140,7 @@ The inherited root [`LICENSE`](LICENSE) remains unchanged. Go toolchain notices
 are kept separately in [`LICENSES/`](LICENSES/), and vendored runtime license
 files remain beside their corresponding dependencies. See
 [ORIGIN.md](ORIGIN.md) for the source and distribution boundaries.
+
+## October 2026 security maintenance
+
+Maintained Go builds select the patched Go 1.27.3 compiler without raising the existing Go language requirement. Alpine 3.23 runtime images pin `ca-certificates 20261020-r0`. Release artifacts must pass the repository's existing checks before publication.
