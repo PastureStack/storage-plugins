@@ -21,6 +21,9 @@ LABEL org.opencontainers.image.source="https://github.com/PastureStack/storage-p
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${IMAGE_VERSION}"
 RUN apk add --no-cache \
+        musl=1.2.5-r24 \
+        musl-utils=1.2.5-r24 \
+        zlib=1.3.2-r1 \
         bash=5.3.3-r1 \
         ca-certificates=20261020-r0 \
         curl=8.22.0-r0 \
